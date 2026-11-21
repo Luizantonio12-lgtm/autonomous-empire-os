@@ -272,7 +272,7 @@ async def run_specialist_step(directive: str) -> dict:
             local_fallback_text=fallback_msg,
         )
 
-        result_msg = f"[{agent.name} · {llm_out.provider.upper()}] {llm_out.content[:650]}"
+        result_msg = f"[{agent.name} · {llm_out.provider.upper()}] {llm_out.content[:2400]}"
 
         await event_bus.publish(
             event_type="DYNAMIC_AGENT_DONE",
