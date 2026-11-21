@@ -24,7 +24,8 @@ class LLMCompletionResult:
 class MultiModelLLMGateway:
     """
     Conector Multi-LLM Real com Cascata de Fallback e Suporte Nativo a APIs Gratuitas:
-      - Suporta Google Gemini (100% Grátis no AI Studio), Groq Llama 3.3 70B (Grátis), DeepSeek, OpenAI e Anthropic.
+      - Google Gemini 3 Flash (100% Grátis no Google AI Studio via x-goog-api-key)
+      - Groq Llama 3.3 70B (Grátis), DeepSeek, OpenAI e Anthropic.
       - Contabiliza cada chamada automaticamente no FinancialLedgerInterceptor.
     """
 
@@ -51,13 +52,13 @@ class MultiModelLLMGateway:
             candidates = [
                 ("anthropic", "claude-3-5-sonnet", anthropic_key),
                 ("openai", "gpt-4o", openai_key),
-                ("gemini", "gemini-2.5-flash", gemini_key),
+                ("gemini", "gemini-3-flash-preview", gemini_key),
                 ("groq", "llama-3.3-70b-versatile", groq_key),
                 ("deepseek", "deepseek-reasoner", deepseek_key),
             ]
         else:
             candidates = [
-                ("gemini", "gemini-2.5-flash", gemini_key),
+                ("gemini", "gemini-3-flash-preview", gemini_key),
                 ("groq", "llama-3.3-70b-versatile", groq_key),
                 ("deepseek", "deepseek-chat", deepseek_key),
                 ("openai", "gpt-4o-mini", openai_key),
@@ -72,13 +73,31 @@ class MultiModelLLMGateway:
 
             try:
                 async with httpx.AsyncClient(timeout=22.0) as client:
-                    if provider in ("openai", "deepseek", "groq", "gemini"):
+                    if provider == "gemini":
+                        resp = await client.post(
+                            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                            headers={
+                                "x-goog-api-key": api_key,
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "systemInstruction": {"parts": [{"text": system_prompt}]},
+                                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+                                "generationConfig": {"temperature": 0.25, "maxOutputTokens": 1800},
+                            },
+                        )
+                        resp.raise_for_status()
+                        body = resp.json()
+                        parts = body["candidates"][0]["content"]["parts"]
+                        text = "".join(p.get("text", "") for p in parts).strip()
+                        meta = body.get("usageMetadata", {})
+                        p_tok = int(meta.get("promptTokenCount") or max(120, len(user_prompt) // 3))
+                        c_tok = int(meta.get("candidatesTokenCount") or max(80, len(text) // 3))
+                    elif provider in ("openai", "deepseek", "groq"):
                         if provider == "openai":
                             base = "https://api.openai.com/v1"
                         elif provider == "groq":
                             base = "https://api.groq.com/openai/v1"
-                        elif provider == "gemini":
-                            base = "https://generativelanguage.googleapis.com/v1beta/openai"
                         else:
                             base = deepseek_url.rstrip("/")
 

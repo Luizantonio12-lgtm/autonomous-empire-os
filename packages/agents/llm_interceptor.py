@@ -9,6 +9,8 @@ from packages.database.models import AgentRegistry, FinancialLedger, TaskExecuti
 
 # Tabela Oficial de Preços por 1M Tokens (USD)
 MODEL_PRICING_PER_1M: dict[str, tuple[float, float]] = {
+    "gemini-3-flash-preview": (0.0, 0.0),
+    "llama-3.3-70b-versatile": (0.0, 0.0),
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
     "claude-3-5-sonnet": (3.00, 15.00),
@@ -28,6 +30,8 @@ class FinancialLedgerInterceptor:
     @staticmethod
     def compute_token_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
         in_rate, out_rate = MODEL_PRICING_PER_1M.get(model, (2.50, 10.00))
+        if in_rate == 0.0 and out_rate == 0.0:
+            return 0.0
         cost = (prompt_tokens / 1_000_000.0) * in_rate + (completion_tokens / 1_000_000.0) * out_rate
         return round(max(cost, 0.000120), 6)
 
