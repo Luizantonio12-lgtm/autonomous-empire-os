@@ -2069,13 +2069,26 @@ export default function App() {
 
                       <div className="flex flex-wrap gap-2 shrink-0">
                         {inv.pix_copy_paste && (
-                          <button
-                            onClick={() => copyText(inv.id, inv.pix_copy_paste!)}
-                            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center gap-1 cursor-pointer"
-                          >
-                            <Copy className="w-3.5 h-3.5" />
-                            {copiedId === inv.id ? 'Pix Copiado!' : 'Pix Copia-e-Cola'}
-                          </button>
+                          <>
+                            <button
+                              onClick={() => copyText(inv.id, inv.pix_copy_paste!)}
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center gap-1 cursor-pointer"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                              {copiedId === inv.id ? 'Pix Copiado!' : 'Pix Copia-e-Cola'}
+                            </button>
+                            <a
+                              href={`https://wa.me/?text=${encodeURIComponent(
+                                `Olá ${inv.client_name}! Segue o código Pix Copia e Cola referente a ${inv.description} (R$ ${(inv.amount_usd * 5.65).toFixed(2)}):\n\n${inv.pix_copy_paste}`
+                              )}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="px-2.5 py-1.5 rounded-lg bg-emerald-600/25 border border-emerald-500/40 hover:bg-emerald-600/40 text-xs text-emerald-300 font-semibold flex items-center gap-1"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                              Cobrar no WhatsApp
+                            </a>
+                          </>
                         )}
                         {inv.status === 'PENDING' && (
                           <button

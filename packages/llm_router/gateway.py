@@ -23,10 +23,9 @@ class LLMCompletionResult:
 
 class MultiModelLLMGateway:
     """
-    Conector Multi-LLM Real com Cascata de Fallback e Otimização de Margem:
-      - Estratégia MARGIN_OPTIMIZED: DeepSeek V3 -> OpenAI GPT-4o-mini -> Anthropic Claude -> Motor Local
-      - Estratégia PREMIUM_REASONING: Anthropic Claude 3.5 Sonnet -> OpenAI GPT-4o -> DeepSeek R1 -> Motor Local
-    Contabiliza cada chamada automaticamente no FinancialLedgerInterceptor.
+    Conector Multi-LLM Real com Cascata de Fallback e Suporte Nativo a APIs Gratuitas:
+      - Suporta Google Gemini (100% Grátis no AI Studio), Groq Llama 3.3 70B (Grátis), DeepSeek, OpenAI e Anthropic.
+      - Contabiliza cada chamada automaticamente no FinancialLedgerInterceptor.
     """
 
     @classmethod
@@ -41,20 +40,25 @@ class MultiModelLLMGateway:
         strategy: str = "MARGIN_OPTIMIZED",
         local_fallback_text: str = "",
     ) -> LLMCompletionResult:
+        gemini_key = await ConfigVault.get_secret(db, "GEMINI_API_KEY")
+        groq_key = await ConfigVault.get_secret(db, "GROQ_API_KEY")
         openai_key = await ConfigVault.get_secret(db, "OPENAI_API_KEY")
         anthropic_key = await ConfigVault.get_secret(db, "ANTHROPIC_API_KEY")
         deepseek_key = await ConfigVault.get_secret(db, "DEEPSEEK_API_KEY")
         deepseek_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 
-        # Define ordem da cascata conforme estratégia de negócio
         if strategy == "PREMIUM_REASONING":
             candidates = [
                 ("anthropic", "claude-3-5-sonnet", anthropic_key),
                 ("openai", "gpt-4o", openai_key),
+                ("gemini", "gemini-2.5-flash", gemini_key),
+                ("groq", "llama-3.3-70b-versatile", groq_key),
                 ("deepseek", "deepseek-reasoner", deepseek_key),
             ]
         else:
             candidates = [
+                ("gemini", "gemini-2.5-flash", gemini_key),
+                ("groq", "llama-3.3-70b-versatile", groq_key),
                 ("deepseek", "deepseek-chat", deepseek_key),
                 ("openai", "gpt-4o-mini", openai_key),
                 ("anthropic", "claude-3-5-sonnet", anthropic_key),
@@ -67,9 +71,17 @@ class MultiModelLLMGateway:
                 continue
 
             try:
-                async with httpx.AsyncClient(timeout=20.0) as client:
-                    if provider in ("openai", "deepseek"):
-                        base = "https://api.openai.com/v1" if provider == "openai" else deepseek_url.rstrip("/")
+                async with httpx.AsyncClient(timeout=22.0) as client:
+                    if provider in ("openai", "deepseek", "groq", "gemini"):
+                        if provider == "openai":
+                            base = "https://api.openai.com/v1"
+                        elif provider == "groq":
+                            base = "https://api.groq.com/openai/v1"
+                        elif provider == "gemini":
+                            base = "https://generativelanguage.googleapis.com/v1beta/openai"
+                        else:
+                            base = deepseek_url.rstrip("/")
+
                         resp = await client.post(
                             f"{base}/chat/completions",
                             headers={
@@ -142,7 +154,6 @@ class MultiModelLLMGateway:
                 )
                 continue
 
-        # Fallback determinístico local de alta disponibilidade (quando sem chaves externas configuradas)
         default_model = "deepseek-chat" if strategy == "MARGIN_OPTIMIZED" else "claude-3-5-sonnet"
         p_tok = max(240, (len(system_prompt) + len(user_prompt)) // 3)
         c_tok = max(160, len(local_fallback_text) // 3) if local_fallback_text else 210

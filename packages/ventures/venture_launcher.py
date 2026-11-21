@@ -18,7 +18,7 @@ from packages.database.models import (
     ScheduledJob,
     SoftwareProject,
 )
-from packages.llm_router import MultiModelLLMGateway
+from packages.llm_router import ConfigVault, MultiModelLLMGateway
 from packages.memory import EmpireSemanticMemory
 from packages.payments import PaymentGatewayManager
 from packages.sandbox_runner import sandbox_executor
@@ -258,7 +258,21 @@ document.getElementById('checkoutForm').addEventListener('submit', async (e) => 
     const data = await resp.json();
     resBox.style.display = 'block';
     if (resp.ok && data.ok) {
-      resBox.innerHTML = '<strong>✅ Subscrição Ativada com Sucesso!</strong><br/>Fatura <code>' + data.invoice_id + '</code> liquidada via ' + provider + '. MRR atualizado no teu Painel ADM Central e mensagem de boas-vindas enviada no WhatsApp!';
+      if (data.live_pix_mode && data.pix_qr_svg) {
+        resBox.innerHTML =
+          '<div style="text-align:center;">' +
+          '<strong style="color:#34d399;font-size:14px;">📲 Escaneia o QR Code Pix Oficial (R$ ' + data.brl_amount + ')</strong>' +
+          '<div style="margin:12px auto;display:flex;justify-content:center;">' + data.pix_qr_svg + '</div>' +
+          '<input id="pixCodeOut" readonly value="' + data.pix_copy_paste + '" style="width:100%;font-size:11px;padding:8px;border-radius:8px;background:#020617;color:#a7f3d0;border:1px solid #10b981;margin-bottom:8px;" />' +
+          '<button type="button" onclick="navigator.clipboard.writeText(document.getElementById(\'pixCodeOut\').value);this.textContent=\'✅ Código Pix Copiado!\'" style="width:100%;padding:9px;border-radius:8px;background:#10b981;color:#022c22;font-weight:800;border:none;cursor:pointer;margin-bottom:6px;">Copiar Pix Copia e Cola</button>' +
+          (data.whatsapp_support_url ? '<a href="' + data.whatsapp_support_url + '" target="_blank" style="display:block;text-decoration:none;padding:8px;border-radius:8px;background:#065f46;color:#ecfdf5;font-weight:700;">💬 Confirmar Acesso no WhatsApp</a>' : '') +
+          '<div style="font-size:11px;color:#94a3b8;margin-top:6px;">Assim que pagares no teu banco, o sistema libera o teu acesso automaticamente!</div>' +
+          '</div>';
+      } else if (data.checkout_url && provider === 'STRIPE') {
+        resBox.innerHTML = '<strong>💳 Checkout Gerado!</strong><br/><a href="' + data.checkout_url + '" target="_blank" style="color:#38bdf8;font-weight:700;">Abrir Pagamento Seguro Stripe →</a>';
+      } else {
+        resBox.innerHTML = '<strong>✅ Subscrição Ativada com Sucesso!</strong><br/>Fatura <code>' + data.invoice_id + '</code> liquidada via ' + provider + '. MRR atualizado no Painel ADM Central!';
+      }
     } else {
       resBox.textContent = 'Aviso: ' + (data.detail || 'Não foi possível concluir checkout.');
     }
@@ -515,29 +529,74 @@ if __name__ == "__main__":
         customer_phone: str,
         provider: str = "ASAAS_PIX",
     ) -> dict:
+        import urllib.parse
+
         res = await db.execute(select(BusinessVenture).where(BusinessVenture.id == venture_id))
         ven = res.scalar_one_or_none()
         if not ven:
             raise ValueError("Negócio não encontrado.")
 
-        # 1. Emite e liquida a cobrança real no Gateway (Pix ou Stripe) -> cai no FinancialLedger!
+        asaas_key = await ConfigVault.get_secret(db, "ASAAS_API_KEY")
+        stripe_key = await ConfigVault.get_secret(db, "STRIPE_SECRET_KEY")
+        ceo_wa = await ConfigVault.get_secret(db, "CEO_WHATSAPP_NUMBER")
+        clean_wa = re.sub(r"\D", "", ceo_wa) if ceo_wa else ""
+
         inv = await PaymentGatewayManager.create_invoice(
             db=db,
             provider=provider,
             client_name=customer_name,
             client_email=customer_email,
-            description=f"Assinatura Mensal {ven.name} ({ven.niche})",
+            description=f"{ven.name}",
             amount_usd=ven.monthly_price_usd,
         )
-        await PaymentGatewayManager.reconcile_paid_webhook(db, inv.id)
 
-        # 2. Atualiza métricas da empresa (Clientes Ativos + MRR + Receita Acumulada)
+        # Se ASAAS_API_KEY real estiver ativa, entrega o QR Code real p/ o cliente pagar no banco!
+        if provider.upper() == "ASAAS_PIX" and asaas_key:
+            brl_amount = f"{max(round(ven.monthly_price_usd * 5.65, 2), 1.0):.2f}"
+            wa_msg = urllib.parse.quote(
+                f"Olá! Acabei de gerar minha assinatura do {ven.name} (fatura {inv.id} - R$ {brl_amount})."
+            )
+            wa_url = f"https://wa.me/{clean_wa}?text={wa_msg}" if clean_wa else ""
+
+            await Support24hAgent.handle_inbound_ticket(
+                db=db,
+                task_id=None,
+                channel="WHATSAPP_EVOLUTION",
+                contact_name=customer_name,
+                contact_handle=customer_phone,
+                message=f"[Lead Checkout Pix Real - {ven.name}] QR Code R$ {brl_amount} gerado ({inv.id}). Aguardando confirmação bancária.",
+            )
+            return {
+                "ok": True,
+                "live_pix_mode": True,
+                "venture_id": ven.id,
+                "invoice_id": inv.id,
+                "brl_amount": brl_amount,
+                "pix_qr_svg": inv.pix_qr_svg,
+                "pix_copy_paste": inv.pix_copy_paste,
+                "whatsapp_support_url": wa_url,
+                "new_mrr_usd": ven.mrr_usd,
+                "active_customers": ven.active_customers,
+            }
+
+        if provider.upper() == "STRIPE" and stripe_key and inv.checkout_url:
+            return {
+                "ok": True,
+                "live_pix_mode": False,
+                "venture_id": ven.id,
+                "invoice_id": inv.id,
+                "checkout_url": inv.checkout_url,
+                "new_mrr_usd": ven.mrr_usd,
+                "active_customers": ven.active_customers,
+            }
+
+        # Modo Demonstração (quando nenhuma chave externa foi configurada)
+        await PaymentGatewayManager.reconcile_paid_webhook(db, inv.id)
         ven.active_customers = (ven.active_customers or 0) + 1
         ven.mrr_usd = round((ven.mrr_usd or 0.0) + ven.monthly_price_usd, 2)
         ven.total_revenue_usd = round((ven.total_revenue_usd or 0.0) + ven.monthly_price_usd, 2)
         await db.commit()
 
-        # 3. Aciona Agente de Suporte 24h para enviar Onboarding Automático via WhatsApp!
         await Support24hAgent.handle_inbound_ticket(
             db=db,
             task_id=None,
@@ -560,6 +619,7 @@ if __name__ == "__main__":
 
         return {
             "ok": True,
+            "live_pix_mode": False,
             "venture_id": ven.id,
             "invoice_id": inv.id,
             "new_mrr_usd": ven.mrr_usd,

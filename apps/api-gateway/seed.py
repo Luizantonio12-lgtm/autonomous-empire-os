@@ -219,14 +219,32 @@ async def seed_initial_empire_state() -> None:
             simulate_fault_healing=True,
         )
 
-        # 1.º Negócio Comercial Flagship construído, publicado e a vender 24/7
+        # Portfólio Comercial de 3 Empresas SaaS Prontas p/ Vender no Pix
         await AutonomousVentureBuilder.launch_full_venture(
             db=db,
             name="NexusFlow AI",
-            niche="Clínicas Médicas, Escritórios & E-Commerce B2B",
+            niche="Clínicas Médicas, Odontológicas & Escritórios",
             tagline="Atendimento WhatsApp IA 24h, Agendamento Anti-Faltas e Cobrança Pix Automática",
-            monthly_price_usd=297.00,
+            monthly_price_usd=49.00,
             initial_customers=6,
+        )
+
+        await AutonomousVentureBuilder.launch_full_venture(
+            db=db,
+            name="AgendaCorte Pro AI",
+            niche="Barbearias, Salões de Beleza & Estética",
+            tagline="Agendamento 24h pelo WhatsApp, Lembrete Automático de Horário e Sinal via Pix",
+            monthly_price_usd=19.00,
+            initial_customers=8,
+        )
+
+        await AutonomousVentureBuilder.launch_full_venture(
+            db=db,
+            name="ZapPedido Delivery AI",
+            niche="Pizzarias, Hamburguerias & Delivery",
+            tagline="Cardápio Inteligente no WhatsApp, Fechamento de Pedido IA e Pagamento Pix na Hora",
+            monthly_price_usd=29.00,
+            initial_customers=5,
         )
 
         await MetaCreatorAgent.propose_specialized_agent(

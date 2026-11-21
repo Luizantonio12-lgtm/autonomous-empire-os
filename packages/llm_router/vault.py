@@ -6,14 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from packages.database.models import RuntimeVault
 
 SUPPORTED_VAULT_KEYS = [
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "STRIPE_SECRET_KEY",
     "ASAAS_API_KEY",
-    "VERCEL_TOKEN",
+    "STRIPE_SECRET_KEY",
+    "CEO_WHATSAPP_NUMBER",
     "EVOLUTION_API_URL",
     "EVOLUTION_API_KEY",
+    "VERCEL_TOKEN",
 ]
 
 
@@ -28,7 +31,7 @@ class ConfigVault:
     def _mask(val: str) -> str:
         if not val:
             return ""
-        if val.startswith("http"):
+        if val.startswith("http") or val.startswith("+") or val.isdigit():
             return val
         if len(val) <= 8:
             return "••••••••"
