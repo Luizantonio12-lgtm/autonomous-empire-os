@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: empire-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-empire_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-empire_secret_2026}
+      POSTGRES_DB: ${POSTGRES_DB:-autonomous_empire}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./packages/database/00_create_dbs.sql:/docker-entrypoint-initdb.d/00_create_dbs.sql:ro
+      - ./packages/database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-empire_admin} -d $${POSTGRES_DB:-autonomous_empire}"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+
+  redis:
+    image: redis:7-alpine
+    container_name: empire-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  evolution-api:
+    image: evoapicloud/evolution-api:v2.3.6
+    container_name: empire-whatsapp-evolution
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SERVER_URL: ${EVOLUTION_PUBLIC_URL:-http://localhost:8080}
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-empire_evo_master_key}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-empire_admin}:${POSTGRES_PASSWORD:-empire_secret_2026}@postgres:5432/evolution
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/1
+      WEBHOOK_GLOBAL_ENABLED: "true"
+      WEBHOOK_GLOBAL_URL: http://api-gateway:8000/api/webhooks/evolution
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: apps/api-gateway/Dockerfile
+    container_name: empire-api-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-empire_admin}:${POSTGRES_PASSWORD:-empire_secret_2026}@postgres:5432/${POSTGRES_DB:-autonomous_empire}
+      REDIS_URL: redis://redis:6379/0
+      EVOLUTION_API_URL: http://evolution-api:8080
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:-empire_evo_master_key}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      ASAAS_API_KEY: ${ASAAS_API_KEY:-}
+      VERCEL_TOKEN: ${VERCEL_TOKEN:-}
+      EMPIRE_CEO_PASSWORD: ${EMPIRE_CEO_PASSWORD:-empire2026}
+      EMPIRE_JWT_SECRET: ${EMPIRE_JWT_SECRET:-empire_sovereign_jwt_2026}
+      EMPIRE_TOTP_SECRET: ${EMPIRE_TOTP_SECRET:-JBSWY3DPEHPK3PXP}
+    volumes:
+      - deployments_data:/app/deployments
+    ports:
+      - "8000:8000"
+
+  command-center:
+    build:
+      context: ./apps/command-center
+      dockerfile: Dockerfile
+    container_name: empire-command-center
+    restart: unless-stopped
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    ports:
+      - "80:3000"
+      - "${COMMAND_CENTER_PORT:-3000}:3000"
+
+volumes:
+  postgres_data:
+  redis_data:
+  deployments_data:

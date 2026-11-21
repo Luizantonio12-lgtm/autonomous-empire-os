@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+apps/command-center/node_modules/
+apps/command-center/dist/
+empire_state.db
+deployments/
+backups/
+.env
+gcp_provision_key*
+gcp_pkce_session.json
+.gcp_pending_token.json
+.gh_device_session.json
+.gcloud_cfg/

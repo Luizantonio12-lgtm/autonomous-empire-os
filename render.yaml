@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: autonomous-empire-os
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /api/health
+    envVars:
+      - key: EMPIRE_CEO_PASSWORD
+        value: empire2026
+      - key: EMPIRE_JWT_SECRET
+        generateValue: true
+      - key: EMPIRE_TOTP_SECRET
+        value: JBSWY3DPEHPK3PXP
