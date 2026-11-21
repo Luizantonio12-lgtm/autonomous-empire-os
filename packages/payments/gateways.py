@@ -3,7 +3,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.agents.llm_interceptor import FinancialLedgerInterceptor
@@ -15,7 +15,7 @@ from packages.llm_router.vault import ConfigVault
 def generate_matrix_qr_svg(payload_text: str, accent_color: str = "#10b981") -> str:
     """
     Gera QR Matrix SVG autónomo (zero dependências externas) para pré-visualização
-    instantânea de cobranças Pix e pareamento quando offline/sandbox.
+    instantânea quando em modo sandbox sem chave real.
     """
     size = 21
     digest = hashlib.sha256(payload_text.encode("utf-8")).digest()
@@ -64,7 +64,7 @@ class PaymentGatewayManager:
     """
     Conector Financeiro de Produção:
       - STRIPE: Cria Checkout Sessions reais via API REST Stripe (quando STRIPE_SECRET_KEY ativa)
-      - ASAAS_PIX: Cria cobranças Pix reais na API Asaas v3 com Copia-e-Cola e QR Code (quando ASAAS_API_KEY ativa)
+      - ASAAS_PIX: Gera QR Code Pix Banco Central real (EMV + imagem escaneável) via Asaas API v3
       - Webhook Conciliador: Liquida faturas PENDING -> PAID e credita automaticamente o FinancialLedger.
     """
 
@@ -96,8 +96,8 @@ class PaymentGatewayManager:
                             data={
                                 "mode": "payment",
                                 "customer_email": client_email,
-                                "success_url": "https://empire.local/success?session_id={CHECKOUT_SESSION_ID}",
-                                "cancel_url": "https://empire.local/cancel",
+                                "success_url": "https://autonomous-empire-os.onrender.com/?paid=1",
+                                "cancel_url": "https://autonomous-empire-os.onrender.com/",
                                 "line_items[0][price_data][currency]": "usd",
                                 "line_items[0][price_data][product_data][name]": description,
                                 "line_items[0][price_data][unit_amount]": int(round(amount_usd * 100)),
@@ -115,41 +115,65 @@ class PaymentGatewayManager:
             if not checkout_url:
                 checkout_url = f"https://checkout.stripe.com/c/pay/cs_empire_{inv_id}"
 
-        else:  # ASAAS_PIX
+        else:  # ASAAS_PIX (Produção Real Banco Central)
             asaas_key = await ConfigVault.get_secret(db, "ASAAS_API_KEY")
             asaas_base = os.getenv("ASAAS_BASE_URL", "https://api.asaas.com/v3").rstrip("/")
+            asaas_headers = {
+                "access_token": asaas_key or "",
+                "User-Agent": "AutonomousEmpireOS/3.0",
+                "Content-Type": "application/json",
+            }
             if asaas_key:
                 try:
-                    async with httpx.AsyncClient(timeout=12.0) as client:
-                        cust_resp = await client.post(
-                            f"{asaas_base}/customers",
-                            headers={"access_token": asaas_key},
-                            json={"name": client_name, "email": client_email},
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        # 1. Obtém chave Pix EVP ativa da conta Asaas (ou cria automaticamente)
+                        address_key: str | None = None
+                        keys_resp = await client.get(
+                            f"{asaas_base}/pix/addressKeys",
+                            headers=asaas_headers,
                         )
-                        if cust_resp.status_code < 300:
-                            customer_id = cust_resp.json()["id"]
-                            pay_resp = await client.post(
-                                f"{asaas_base}/payments",
-                                headers={"access_token": asaas_key},
+                        if keys_resp.status_code < 300:
+                            items = keys_resp.json().get("data", [])
+                            active_keys = [k for k in items if k.get("status") == "ACTIVE"]
+                            if active_keys:
+                                address_key = active_keys[0].get("key")
+
+                        if not address_key:
+                            create_key_resp = await client.post(
+                                f"{asaas_base}/pix/addressKeys",
+                                headers=asaas_headers,
+                                json={"type": "EVP"},
+                            )
+                            if create_key_resp.status_code < 300:
+                                address_key = create_key_resp.json().get("key")
+
+                        # 2. Gera QR Code Pix oficial escaneável em Reais (BRL)
+                        if address_key:
+                            brl_value = max(round(amount_usd * 5.65, 2), 1.0)
+                            clean_desc = (description or "NexusFlow AI").strip()[:35]
+                            qr_resp = await client.post(
+                                f"{asaas_base}/pix/qrCodes/static",
+                                headers=asaas_headers,
                                 json={
-                                    "customer": customer_id,
-                                    "billingType": "PIX",
-                                    "value": round(amount_usd * 5.65, 2),
-                                    "dueDate": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                                    "description": description,
+                                    "addressKey": address_key,
+                                    "description": clean_desc,
+                                    "value": brl_value,
+                                    "format": "ALL",
                                     "externalReference": inv_id,
                                 },
                             )
-                            if pay_resp.status_code < 300:
-                                pbody = pay_resp.json()
-                                external_id = pbody["id"]
-                                checkout_url = pbody.get("invoiceUrl")
-                                qr_resp = await client.get(
-                                    f"{asaas_base}/payments/{external_id}/pixQrCode",
-                                    headers={"access_token": asaas_key},
-                                )
-                                if qr_resp.status_code < 300:
-                                    pix_copy_paste = qr_resp.json().get("payload")
+                            if qr_resp.status_code < 300:
+                                qdata = qr_resp.json()
+                                external_id = qdata.get("id", external_id)
+                                pix_copy_paste = qdata.get("payload")
+                                encoded_img = qdata.get("encodedImage")
+                                if encoded_img:
+                                    pix_qr_svg = (
+                                        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">'
+                                        '<rect width="192" height="192" rx="12" fill="#ffffff"/>'
+                                        f'<image href="data:image/png;base64,{encoded_img}" x="8" y="8" width="176" height="176"/>'
+                                        "</svg>"
+                                    )
                 except Exception:
                     pass
 
@@ -158,7 +182,8 @@ class PaymentGatewayManager:
                     f"00020126580014BR.GOV.BCB.PIX0136empire-treasury-{inv_id}"
                     f"5204000053039865407{amount_usd:.2f}5802BR5917AUTONOMOUS EMPIRE6009SAO PAULO62070503***6304ABCD"
                 )
-            pix_qr_svg = generate_matrix_qr_svg(pix_copy_paste, accent_color="#10b981")
+            if not pix_qr_svg:
+                pix_qr_svg = generate_matrix_qr_svg(pix_copy_paste, accent_color="#10b981")
 
         invoice = PaymentInvoice(
             id=inv_id,
@@ -202,13 +227,12 @@ class PaymentGatewayManager:
         inv.paid_at = datetime.now(timezone.utc)
         await db.commit()
 
-        # Lança receita confirmada no Razão Contabilístico Imutável
         await FinancialLedgerInterceptor.record_custom_transaction(
             db=db,
             entry_type="REVENUE",
             category=f"GATEWAY_{inv.provider}",
             amount_usd=inv.amount_usd,
-            description=f" Liquidação {inv.provider} ({inv.id}) — {inv.client_name}: {inv.description}",
+            description=f"Liquidação {inv.provider} ({inv.id}) — {inv.client_name}: {inv.description}",
             agent_id="agent-finance",
             metadata={
                 "invoice_id": inv.id,
@@ -225,3 +249,57 @@ class PaymentGatewayManager:
             payload={"invoice_id": inv.id, "amount_usd": inv.amount_usd},
         )
         return inv
+
+    @classmethod
+    async def handle_asaas_webhook(
+        cls,
+        db: AsyncSession,
+        body: dict,
+    ) -> dict:
+        event = str(body.get("event", ""))
+        payment = body.get("payment") or {}
+        if event not in ("PAYMENT_RECEIVED", "PAYMENT_CONFIRMED"):
+            return {"ignored": True, "event": event}
+
+        ext_ref = payment.get("externalReference")
+        pix_qr_id = payment.get("pixQrCodeId")
+        pay_id = payment.get("id")
+
+        filters = []
+        if ext_ref:
+            filters.append(PaymentInvoice.id == str(ext_ref))
+        if pix_qr_id:
+            filters.append(PaymentInvoice.external_id == str(pix_qr_id))
+        if pay_id:
+            filters.append(PaymentInvoice.external_id == str(pay_id))
+
+        if filters:
+            res = await db.execute(select(PaymentInvoice).where(or_(*filters)))
+            inv = res.scalars().first()
+            if inv:
+                settled = await cls.reconcile_paid_webhook(db, inv.id)
+                return {"settled": True, "invoice_id": settled.id}
+
+        # Caso seja um Pix recebido diretamente na chave EVP fora de uma fatura prévia
+        brl_val = float(payment.get("value") or 0.0)
+        if brl_val > 0:
+            usd_equiv = round(brl_val / 5.65, 2)
+            await FinancialLedgerInterceptor.record_custom_transaction(
+                db=db,
+                entry_type="REVENUE",
+                category="GATEWAY_ASAAS_PIX",
+                amount_usd=usd_equiv,
+                description=f"Pix Real Recebido no Asaas (R$ {brl_val:,.2f} BRL) — ref {pay_id}",
+                agent_id="agent-finance",
+                metadata={"asaas_payment_id": pay_id, "value_brl": brl_val},
+            )
+            await event_bus.publish(
+                event_type="PAYMENT_WEBHOOK_SETTLED",
+                agent_slug="finance-cfo",
+                level="SUCCESS",
+                message=f"PIX REAL RECEBIDO NO ASAAS! R$ {brl_val:,.2f} (+${usd_equiv:,.2f} USD) creditados no Caixa.",
+                payload={"value_brl": brl_val, "amount_usd": usd_equiv},
+            )
+            return {"settled": True, "direct_pix": True, "value_brl": brl_val}
+
+        return {"ignored": True}

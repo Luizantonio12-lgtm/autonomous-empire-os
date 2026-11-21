@@ -761,6 +761,19 @@ async def settle_payment_webhook(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@app.post("/api/webhooks/asaas")
+async def asaas_production_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = await PaymentGatewayManager.handle_asaas_webhook(db, body)
+    return {"ok": True, **result}
+
+
 @app.post("/api/whatsapp/qr/refresh")
 async def whatsapp_refresh_qr(db: AsyncSession = Depends(get_db)):
     state = await EvolutionWhatsAppManager.refresh_qr_code(db)
