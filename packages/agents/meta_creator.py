@@ -246,6 +246,8 @@ async def run_specialist_step(directive: str) -> dict:
         task_id: str,
         directive: str,
     ) -> str:
+        from packages.llm_router import MultiModelLLMGateway
+
         await event_bus.publish(
             event_type="DYNAMIC_AGENT_EXEC",
             agent_slug=agent.slug,
@@ -254,20 +256,23 @@ async def run_specialist_step(directive: str) -> dict:
             payload={"agent_id": agent.id, "task_id": task_id},
         )
 
-        await FinancialLedgerInterceptor.record_llm_usage(
-            db=db,
-            agent_id=agent.id,
-            task_id=task_id,
-            model=agent.model_name,
-            prompt_tokens=640,
-            completion_tokens=410,
-            operation_label=f"Execução Especializada ({agent.name})",
-        )
-
-        result_msg = (
+        fallback_msg = (
             f"[{agent.name}] Missão concluída com sucesso usando {', '.join(agent.tools_manifest[:3])}: "
             f"diretriz '{directive[:90]}' implementada e métricas sincronizadas."
         )
+
+        llm_out = await MultiModelLLMGateway.complete(
+            db=db,
+            agent_id=agent.id,
+            task_id=task_id,
+            system_prompt=agent.system_prompt or f"És o especialista autónomo {agent.name}. Responde em português objetivo e prático.",
+            user_prompt=f"Diretriz do CEO: {directive}\nFerramentas ativas: {', '.join(agent.tools_manifest)}",
+            operation_label=f"Execução Especializada ({agent.name})",
+            strategy="MARGIN_OPTIMIZED",
+            local_fallback_text=fallback_msg,
+        )
+
+        result_msg = f"[{agent.name} · {llm_out.provider.upper()}] {llm_out.content[:650]}"
 
         await event_bus.publish(
             event_type="DYNAMIC_AGENT_DONE",
