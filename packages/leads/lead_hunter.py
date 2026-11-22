@@ -1,3 +1,4 @@
+import base64
 import html
 import json
 import re
@@ -188,6 +189,41 @@ class RealLeadHunter:
                 raw_items.extend(osm_items)
             except Exception:
                 pass
+
+            if len(raw_items) < 4:
+                try:
+                    bing_resp = await client.get(
+                        f"https://www.bing.com/search?q={urllib.parse.quote(f'{niche_clean} \"{city_clean}\" whatsapp instagram')}&setlang=pt-br&cc=BR",
+                        headers={
+                            "User-Agent": (
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+                            ),
+                            "Accept-Language": "pt-BR,pt;q=0.9",
+                        },
+                    )
+                    for blk in re.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', bing_resp.text, re.S)[:10]:
+                        m_b = re.search(r'<h2[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', blk, re.S)
+                        if not m_b:
+                            continue
+                        b_href = html.unescape(m_b.group(1))
+                        if "u=a1" in b_href:
+                            u_val = urllib.parse.parse_qs(urllib.parse.urlparse(b_href).query).get("u", [""])[0][2:]
+                            u_val += "=" * (-len(u_val) % 4)
+                            try:
+                                b_href = base64.urlsafe_b64decode(u_val).decode("utf-8", "ignore")
+                            except Exception:
+                                pass
+                        m_p = re.search(r"<p[^>]*>(.*?)</p>", blk, re.S)
+                        raw_items.append(
+                            {
+                                "title": cls._clean_html(m_b.group(2)),
+                                "snippet": cls._clean_html(m_p.group(1)) if m_p else "",
+                                "url": b_href,
+                            }
+                        )
+                except Exception:
+                    pass
 
         seen_keys: set[str] = set()
         unique_raw: list[dict] = []
