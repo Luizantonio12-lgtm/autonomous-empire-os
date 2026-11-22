@@ -183,6 +183,30 @@ export default function App() {
   const [huntVentureId, setHuntVentureId] = useState('');
   const [huntedLeads, setHuntedLeads] = useState<RealLeadItem[]>([]);
   const [huntingLoading, setHuntingLoading] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
+
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handler = (e: any) => {
+      e.preventDefault();
+      setDeferredInstallPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  const installAndroidApp = async () => {
+    if (deferredInstallPrompt) {
+      deferredInstallPrompt.prompt();
+      await deferredInstallPrompt.userChoice;
+      setDeferredInstallPrompt(null);
+    } else {
+      alert(
+        'Para instalar no Android:\n1. Toca nos 3 pontinhos (⋮) no canto superior direito do Chrome\n2. Toca em "Instalar aplicativo" (ou "Adicionar à tela inicial")!'
+      );
+    }
+  };
 
   const resetRealMode = async () => {
     setBusy(true);
@@ -882,6 +906,16 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* INSTALAR APP ANDROID (PWA NATIVO) */}
+            <button
+              onClick={installAndroidApp}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 hover:bg-emerald-500/30 text-xs font-bold transition cursor-pointer"
+              title="Instalar Painel como Aplicativo no Android"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Instalar App
+            </button>
+
             {/* MODO CAIXA 100% REAL (ZERAR SIMULAÇÕES) */}
             <button
               onClick={resetRealMode}

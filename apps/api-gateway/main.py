@@ -1018,6 +1018,22 @@ FRONTEND_DIST = MONOREPO_ROOT / "apps" / "command-center" / "dist"
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="frontend_assets")
 
+    @app.get("/manifest.webmanifest")
+    async def serve_pwa_manifest():
+        return FileResponse(str(FRONTEND_DIST / "manifest.webmanifest"), media_type="application/manifest+json")
+
+    @app.get("/sw.js")
+    async def serve_pwa_sw():
+        return FileResponse(str(FRONTEND_DIST / "sw.js"), media_type="application/javascript")
+
+    @app.get("/icon-192.png")
+    async def serve_pwa_icon_192():
+        return FileResponse(str(FRONTEND_DIST / "icon-192.png"), media_type="image/png")
+
+    @app.get("/icon-512.png")
+    async def serve_pwa_icon_512():
+        return FileResponse(str(FRONTEND_DIST / "icon-512.png"), media_type="image/png")
+
     @app.get("/")
     async def serve_spa_root():
         return FileResponse(str(FRONTEND_DIST / "index.html"))
