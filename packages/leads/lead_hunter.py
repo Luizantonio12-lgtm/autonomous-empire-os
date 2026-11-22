@@ -141,7 +141,7 @@ class RealLeadHunter:
             f'Responde APENAS um array JSON puro:\n'
             f'[{{"name": "Nome Real", "address": "Bairro/Rua, {city}", "phone": "", "instagram": ""}}]'
         )
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=9.5) as client:
             for model in ("gemini-flash-lite-latest", "gemini-3-flash-preview"):
                 try:
                     resp = await client.post(
@@ -256,7 +256,7 @@ class RealLeadHunter:
         )
         gem_task = asyncio.wait_for(
             cls._query_gemini_local_directory(gemini_key, niche_clean, city_clean),
-            timeout=6.0,
+            timeout=10.5,
         )
         results_triplet = await asyncio.gather(web_task, osm_task, gem_task, return_exceptions=True)
 
