@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 GATEWAY_DIR = Path(__file__).resolve().parent
@@ -45,6 +45,7 @@ from packages.database import (  # noqa: E402
     init_database,
 )
 from packages.integrations import EvolutionWhatsAppManager  # noqa: E402
+from packages.leads import RealLeadHunter  # noqa: E402
 from packages.llm_router import ConfigVault  # noqa: E402
 from packages.memory import EmpireSemanticMemory  # noqa: E402
 from packages.orchestrator import execute_empire_directive  # noqa: E402
@@ -907,6 +908,89 @@ async def update_agent_operational_state(
         message=f"Diretriz operacional atualizada em '{agent.name}': status={agent.status}, teto=${agent.max_budget_per_task_usd:.2f}/task.",
     )
     return {"ok": True, "id": agent.id, "status": agent.status}
+
+
+class LeadHuntRequest(BaseModel):
+    niche: str = Field(..., min_length=2)
+    city: str = Field(..., min_length=2)
+    venture_id: str | None = None
+
+
+@app.post("/api/leads/hunt")
+async def hunt_real_b2b_leads(
+    payload: LeadHuntRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    base_url = f"{request.url.scheme}://{request.url.netloc}"
+    if "127.0.0.1" in base_url or "localhost" in base_url:
+        base_url = "https://autonomous-empire-os.onrender.com"
+    return await RealLeadHunter.hunt_real_businesses(
+        db=db,
+        niche=payload.niche,
+        city=payload.city,
+        venture_id=payload.venture_id,
+        public_base_url=base_url,
+    )
+
+
+@app.post("/api/system/reset-real-mode")
+async def reset_to_strict_real_treasury_mode(db: AsyncSession = Depends(get_db)):
+    # 1. Desliga Piloto Automático simulado
+    await AutonomousSchedulerDaemon.set_autopilot(False)
+
+    # 2. Remove faturas fictícias de demonstração inicial
+    await db.execute(
+        delete(PaymentInvoice).where(
+            PaymentInvoice.client_name.in_(["Construtora Horizonte S.A.", "Nordic Cloud Ventures"])
+        )
+    )
+
+    # 3. Mantém no Ledger APENAS pagamentos reais liquidados via Gateway (Asaas/Stripe)
+    paid_res = await db.execute(select(PaymentInvoice).where(PaymentInvoice.status == "PAID"))
+    paid_invoices = paid_res.scalars().all()
+    paid_ids = {inv.id for inv in paid_invoices}
+
+    led_res = await db.execute(select(FinancialLedger))
+    for entry in led_res.scalars().all():
+        meta = entry.metadata_json or {}
+        if entry.category in ("GATEWAY_ASAAS_PIX", "GATEWAY_STRIPE") and meta.get("invoice_id") in paid_ids:
+            continue
+        await db.delete(entry)
+
+    # 4. Zera custos fictícios acumulados nos agentes
+    ag_res = await db.execute(select(AgentRegistry))
+    for ag in ag_res.scalars().all():
+        ag.total_cost_usd = 0.0
+
+    # 5. Zera métricas fictícias em campanhas
+    cmp_res = await db.execute(select(GrowthCampaign))
+    for c in cmp_res.scalars().all():
+        c.impressions = 0
+        c.clicks = 0
+        c.leads_captured = 0
+        c.ad_spend_usd = 0.0
+        c.attributed_revenue_usd = 0.0
+
+    # 6. Recalcula MRR e Clientes de cada Empresa SaaS APENAS com faturas PAID reais
+    ven_res = await db.execute(select(BusinessVenture))
+    for ven in ven_res.scalars().all():
+        matching_paid = [
+            inv for inv in paid_invoices if ven.name.lower() in (inv.description or "").lower()
+        ]
+        ven.active_customers = len(matching_paid)
+        ven.mrr_usd = round(sum(inv.amount_usd for inv in matching_paid), 2)
+        ven.total_revenue_usd = ven.mrr_usd
+
+    await db.commit()
+
+    await event_bus.publish(
+        event_type="REAL_TREASURY_MODE_ACTIVE",
+        agent_slug="finance-cfo",
+        level="SUCCESS",
+        message="MODO CAIXA 100% REAL ATIVADO! Todas as simulações foram zeradas: o saldo reflete exclusivamente Pix/Stripe reais liquidados.",
+    )
+    return {"ok": True, "paid_real_invoices": len(paid_invoices)}
 
 
 @app.websocket("/ws/telemetry")

@@ -337,8 +337,8 @@ if __name__ == "__main__":
         name: str,
         niche: str,
         tagline: str,
-        monthly_price_usd: float = 297.00,
-        initial_customers: int = 4,
+        monthly_price_usd: float = 29.00,
+        initial_customers: int = 0,
     ) -> BusinessVenture:
         venture_id = f"ven-{uuid.uuid4().hex[:8]}"
         codename = f"{cls._slugify(name)}-{uuid.uuid4().hex[:4]}"
@@ -380,15 +380,6 @@ if __name__ == "__main__":
         commit_hash, _ = await sandbox_executor.finalize_git_and_archive(
             project_id=project_id,
             commit_message=f"feat(venture): commercial saas + live checkout for {name}",
-        )
-
-        await FinancialLedgerInterceptor.record_custom_transaction(
-            db=db,
-            entry_type="EXPENSE",
-            category="SANDBOX_COMPUTE",
-            amount_usd=sbx.compute_cost_usd,
-            description=f"Build & QA SaaS Comercial '{name}' [Git #{commit_hash}]",
-            agent_id="agent-factory",
         )
 
         preview_url = f"/api/factory/builds/{project_id}/index.html"

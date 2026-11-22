@@ -152,81 +152,18 @@ async def seed_initial_empire_state() -> None:
             db=db,
             namespace="CEO_DIRECTIVES",
             source_agent="master-orchestrator",
-            title="Diretriz Soberana de Margem & Autonomia",
-            content="Priorizar DeepSeek/GPT-4o-mini em tarefas rotineiras e Claude 3.5 Sonnet / GPT-4o em código crítico e fecho comercial B2B, mantendo margem líquida acima de 90%.",
+            title="Modo Caixa 100% Real Ativado",
+            content="Apenas liquidações reais confirmadas via Webhook Asaas Pix ou Stripe entram como RECEITA no Ledger Financeiro.",
         )
 
-        await FinancialLedgerInterceptor.record_custom_transaction(
-            db=db,
-            entry_type="REVENUE",
-            category="SAAS_SALE",
-            amount_usd=4850.00,
-            description="Assinaturas Enterprise MRR — Lote Inicial Clientes B2B",
-            agent_id="agent-sales",
-        )
-        await FinancialLedgerInterceptor.record_custom_transaction(
-            db=db,
-            entry_type="EXPENSE",
-            category="INFRASTRUCTURE",
-            amount_usd=42.50,
-            description="Cluster PostgreSQL pgvector + Redis + Evolution API Gateway",
-            agent_id="agent-master",
-        )
-
-        await PaymentGatewayManager.create_invoice(
-            db=db,
-            provider="ASAAS_PIX",
-            client_name="Construtora Horizonte S.A.",
-            client_email="financeiro@horizontesa.com.br",
-            description="Implantação Sistema Web & Agente WhatsApp Dedicado",
-            amount_usd=1950.00,
-        )
-        await PaymentGatewayManager.create_invoice(
-            db=db,
-            provider="STRIPE",
-            client_name="Nordic Cloud Ventures",
-            client_email="billing@nordiccloud.io",
-            description="Licença Anual SaaS Enterprise + Custom Analytics",
-            amount_usd=3400.00,
-        )
-
-        # Campanha inicial publicada pelo novo Agente Tráfego, Social & SEO
-        await GrowthSocialAgent.launch_campaign(
-            db=db,
-            task_id=None,
-            directive="Lançar campanha B2B executiva sobre automação empresarial com agentes de IA",
-            explicit_channel="LINKEDIN_B2B",
-            custom_title="Autoridade B2B LinkedIn — Império Autónomo",
-        )
-
-        await Support24hAgent.handle_inbound_ticket(
-            db=db,
-            task_id=None,
-            channel="WHATSAPP_EVOLUTION",
-            contact_name="Ricardo Almeida (CEO TechSul)",
-            contact_handle="+5511988012345",
-            message="Olá! Preciso confirmar a ativação da nossa chave API Enterprise e fatura deste mês.",
-        )
-
-        await SoftwareFactoryAgent.build_software_project(
-            db=db,
-            task_id=None,
-            name="Neon Cyber Defender",
-            specification="Jogo HTML5 Arcade espacial com sistema de waves, escudos, partículas e HUD em tempo real.",
-            project_type="GAME_HTML5",
-            client_name="Estúdio Lusitânia Digital",
-            contract_value_usd=2900.00,
-            simulate_fault_healing=True,
-        )
-
-        # Portfólio Comercial de 3 Empresas SaaS Prontas p/ Vender no Pix
+        # Portfólio Comercial de 3 Empresas SaaS Prontas p/ Vender no Pix (0 simulações financeiras)
         await AutonomousVentureBuilder.launch_full_venture(
             db=db,
             name="NexusFlow AI",
             niche="Clínicas Médicas, Odontológicas & Escritórios",
             tagline="Atendimento WhatsApp IA 24h, Agendamento Anti-Faltas e Cobrança Pix Automática",
             monthly_price_usd=49.00,
-            initial_customers=6,
+            initial_customers=0,
         )
 
         await AutonomousVentureBuilder.launch_full_venture(
@@ -235,7 +172,7 @@ async def seed_initial_empire_state() -> None:
             niche="Barbearias, Salões de Beleza & Estética",
             tagline="Agendamento 24h pelo WhatsApp, Lembrete Automático de Horário e Sinal via Pix",
             monthly_price_usd=19.00,
-            initial_customers=8,
+            initial_customers=0,
         )
 
         await AutonomousVentureBuilder.launch_full_venture(
@@ -244,7 +181,7 @@ async def seed_initial_empire_state() -> None:
             niche="Pizzarias, Hamburguerias & Delivery",
             tagline="Cardápio Inteligente no WhatsApp, Fechamento de Pedido IA e Pagamento Pix na Hora",
             monthly_price_usd=29.00,
-            initial_customers=5,
+            initial_customers=0,
         )
 
         await MetaCreatorAgent.propose_specialized_agent(

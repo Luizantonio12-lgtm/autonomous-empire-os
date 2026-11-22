@@ -122,68 +122,37 @@ class GrowthSocialAgent:
             local_fallback_text=tpl["body"],
         )
 
-        impressions = random.randint(4200, 18500)
-        clicks = int(impressions * random.uniform(0.038, 0.075))
-        leads = max(3, int(clicks * random.uniform(0.08, 0.16)))
-        ad_spend = tpl["ad_spend"]
-        attributed_rev = round(leads * random.choice([120.0, 185.0, 240.0]), 2)
-
         campaign = GrowthCampaign(
             id=f"cmp-{uuid.uuid4().hex[:8]}",
             title=title,
             channel=channel,
             target_audience=tpl["audience"],
             hook_headline=tpl["hook"],
-            content_body=llm_res.content[:1200],
-            cta_url="https://empire.ai/demo-autonoma",
-            impressions=impressions,
-            clicks=clicks,
-            leads_captured=leads,
-            ad_spend_usd=ad_spend,
-            attributed_revenue_usd=attributed_rev,
-            status="PUBLISHED",
+            content_body=llm_res.content[:1800],
+            cta_url="https://autonomous-empire-os.onrender.com",
+            impressions=0,
+            clicks=0,
+            leads_captured=0,
+            ad_spend_usd=0.0,
+            attributed_revenue_usd=0.0,
+            status="READY_TO_POST",
         )
         db.add(campaign)
         await db.commit()
-
-        if ad_spend > 0:
-            await FinancialLedgerInterceptor.record_custom_transaction(
-                db=db,
-                entry_type="EXPENSE",
-                category="PAID_TRAFFIC_ADS",
-                amount_usd=ad_spend,
-                description=f"Investimento Performance Ads ({channel}) — {title}",
-                agent_id=cls.AGENT_ID,
-                task_id=task_id,
-            )
-
-        await FinancialLedgerInterceptor.record_custom_transaction(
-            db=db,
-            entry_type="REVENUE",
-            category="INBOUND_GROWTH",
-            amount_usd=attributed_rev,
-            description=f"Conversões Self-Serve Geradas por {channel} ({leads} leads qualificados)",
-            agent_id=cls.AGENT_ID,
-            task_id=task_id,
-            metadata={"campaign_id": campaign.id, "leads": leads, "clicks": clicks},
-        )
 
         await EmpireSemanticMemory.store_memory(
             db=db,
             namespace="SALES_PLAYBOOK",
             source_agent="growth-social",
-            title=f"Criativo Vencedor {channel} ({leads} leads)",
-            content=f"Hook: {tpl['hook']} | Público: {tpl['audience']} | Receita atribuída: +${attributed_rev}",
+            title=f"Criativo {channel}: {title[:45]}",
+            content=llm_res.content[:600],
         )
 
         await event_bus.publish(
             event_type="GROWTH_CAMPAIGN_PUBLISHED",
             agent_slug="growth-social",
             level="SUCCESS",
-            message=(
-                f"Campanha [{channel}] publicada! {impressions:,} impressões • {clicks:,} cliques • "
-                f"{leads} leads capturados • +${attributed_rev:,.2f} USD gerados."
-            ),
-            payload={"campaign_id": campaign.id, "leads": leads, "revenue": attributed_rev},
+            message=f"Criativo [{channel}] pronto para publicação ({llm_res.provider.upper()} • Custo $0.00)!",
+            payload={"campaign_id": campaign.id, "leads": 0, "revenue": 0.0},
         )
         return campaign

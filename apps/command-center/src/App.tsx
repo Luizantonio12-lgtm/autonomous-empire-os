@@ -61,13 +61,33 @@ type TabKey =
   | 'LEDGER'
   | 'OMNICHANNEL'
   | 'META'
-  | 'MEMORY_LLM';
+  | 'MEMORY_LLM'
+  | 'LEAD_HUNTER';
+
+interface RealLeadItem {
+  id: string;
+  business_name: string;
+  city: string;
+  niche: string;
+  phone_digits: string;
+  phone_display: string;
+  instagram: string;
+  source_url: string;
+  maps_url: string;
+  snippet: string;
+  venture_id: string;
+  venture_name: string;
+  price_usd: number;
+  price_brl: string;
+  whatsapp_pitch: string;
+  whatsapp_url: string;
+}
 
 export default function App() {
   const [data, setData] = useState<DashboardOverview | null>(null);
   const [events, setEvents] = useState<TelemetryEvent[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabKey>('VENTURES');
+  const [activeTab, setActiveTab] = useState<TabKey>('LEAD_HUNTER');
   const [busy, setBusy] = useState(false);
 
   // Portfólio de Empresas & Venture Launcher
@@ -154,8 +174,78 @@ export default function App() {
   const [newMemNamespace, setNewMemNamespace] = useState('CEO_DIRECTIVES');
   const [newMemTitle, setNewMemTitle] = useState('');
   const [newMemContent, setNewMemContent] = useState('');
-  const [selectedVaultKey, setSelectedVaultKey] = useState('OPENAI_API_KEY');
+  const [selectedVaultKey, setSelectedVaultKey] = useState('GEMINI_API_KEY');
   const [vaultSecretInput, setVaultSecretInput] = useState('');
+
+  // Caçador de Clientes Reais B2B (Web + Maps + Instagram + WhatsApp)
+  const [huntNiche, setHuntNiche] = useState('Barbearia');
+  const [huntCity, setHuntCity] = useState('Guaíra SP');
+  const [huntVentureId, setHuntVentureId] = useState('');
+  const [huntedLeads, setHuntedLeads] = useState<RealLeadItem[]>([]);
+  const [huntingLoading, setHuntingLoading] = useState(false);
+
+  const resetRealMode = async () => {
+    setBusy(true);
+    try {
+      await fetch('/api/system/reset-real-mode', { method: 'POST' });
+      await fetchOverview();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runRealLeadHunter = async (overrideNiche?: string, overrideCity?: string) => {
+    const n = overrideNiche ?? huntNiche;
+    const c = overrideCity ?? huntCity;
+    if (!n.trim() || !c.trim()) return;
+    setHuntingLoading(true);
+    try {
+      const selectedVen =
+        huntVentureId ||
+        data?.ventures.find((v) =>
+          n.toLowerCase().includes('pizz') || n.toLowerCase().includes('hamb')
+            ? v.name.includes('ZapPedido')
+            : n.toLowerCase().includes('clín') || n.toLowerCase().includes('odont')
+            ? v.name.includes('NexusFlow')
+            : v.name.includes('AgendaCorte')
+        )?.id ||
+        data?.ventures[0]?.id ||
+        '';
+      const res = await fetch('/api/leads/hunt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ niche: n, city: c, venture_id: selectedVen || null }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        setHuntedLeads(json.leads || []);
+      }
+      await fetchOverview();
+    } finally {
+      setHuntingLoading(false);
+    }
+  };
+
+  const createPixForRealLead = async (lead: RealLeadItem) => {
+    setBusy(true);
+    try {
+      await fetch('/api/payments/invoices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'ASAAS_PIX',
+          client_name: lead.business_name,
+          client_email: 'cliente@assinatura.com.br',
+          description: `${lead.venture_name} Mensal`,
+          amount_usd: lead.price_usd,
+        }),
+      });
+      await fetchOverview();
+      setActiveTab('LEDGER');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -792,6 +882,17 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* MODO CAIXA 100% REAL (ZERAR SIMULAÇÕES) */}
+            <button
+              onClick={resetRealMode}
+              disabled={busy}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 text-xs font-bold transition cursor-pointer"
+              title="Zerar valores simulados e exibir exclusivamente Pix/Stripe reais pagos"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Caixa 100% Real
+            </button>
+
             {/* PILOTO AUTOMÁTICO 24/7 TOGGLE */}
             <button
               onClick={toggleAutopilot}
@@ -1022,6 +1123,11 @@ export default function App() {
           {(
             [
               {
+                id: 'LEAD_HUNTER',
+                label: '🎯 Caçador de Clientes Reais',
+                icon: Search,
+              },
+              {
                 id: 'VENTURES',
                 label: `Empresas & Produtos SaaS (${data?.ventures.length ?? 0})`,
                 icon: Rocket,
@@ -1077,6 +1183,213 @@ export default function App() {
             );
           })}
         </nav>
+
+        {/* =================================================================
+            TAB CAÇADOR DE CLIENTES REAIS (WEB + MAPS + INSTAGRAM + WHATSAPP)
+        ================================================================== */}
+        {activeTab === 'LEAD_HUNTER' && (
+          <div className="space-y-6">
+            <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-5 space-y-4 shadow-xl">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-bold text-white flex items-center gap-2">
+                    <Search className="w-5 h-5 text-emerald-400" />
+                    Caçador de Clientes Reais B2B (Google Maps • Instagram • Web)
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Busca estabelecimentos reais que existem de verdade na tua cidade ou em qualquer região do Brasil, gera abordagem com Gemini 3 Flash e dispara no WhatsApp + Pix Asaas em 1 toque.
+                  </p>
+                </div>
+                <button
+                  onClick={resetRealMode}
+                  disabled={busy}
+                  className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 text-xs font-bold cursor-pointer"
+                >
+                  Zerar Simulações (Caixa 100% Real)
+                </button>
+              </div>
+
+              {/* Atalhos Rápidos de Nichos e Cidades */}
+              <div className="flex flex-wrap gap-1.5">
+                {['Barbearia', 'Pizzaria', 'Hamburgueria', 'Clínica Odontológica', 'Salão de Beleza', 'Estética'].map(
+                  (preset) => (
+                    <button
+                      key={preset}
+                      onClick={() => setHuntNiche(preset)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold border cursor-pointer ${
+                        huntNiche === preset
+                          ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  )
+                )}
+                <span className="text-slate-600 px-1">|</span>
+                {['Guaíra SP', 'Barretos SP', 'Ribeirão Preto SP', 'Franca SP', 'São José do Rio Preto SP'].map(
+                  (cityPreset) => (
+                    <button
+                      key={cityPreset}
+                      onClick={() => setHuntCity(cityPreset)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold border cursor-pointer ${
+                        huntCity === cityPreset
+                          ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      📍 {cityPreset}
+                    </button>
+                  )
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1 font-semibold">
+                    Nicho / Tipo de Comércio
+                  </label>
+                  <input
+                    value={huntNiche}
+                    onChange={(e) => setHuntNiche(e.target.value)}
+                    placeholder="Ex: Barbearia, Pizzaria..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1 font-semibold">
+                    Cidade + Estado
+                  </label>
+                  <input
+                    value={huntCity}
+                    onChange={(e) => setHuntCity(e.target.value)}
+                    placeholder="Ex: Guaíra SP"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1 font-semibold">
+                    Produto SaaS p/ Ofertar
+                  </label>
+                  <select
+                    value={huntVentureId}
+                    onChange={(e) => setHuntVentureId(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-emerald-300"
+                  >
+                    <option value="">Auto-Selecionar pelo Nicho</option>
+                    {data?.ventures.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.name} (${v.monthly_price_usd}/mês)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={() => runRealLeadHunter()}
+                    disabled={huntingLoading}
+                    className="w-full py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 transition cursor-pointer"
+                  >
+                    <Search className="w-4 h-4" />
+                    {huntingLoading ? 'Buscando na Web Real...' : 'Buscar Empresas Reais'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Resultados Reais Encontrados */}
+            {huntedLeads.length === 0 ? (
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-8 text-center space-y-2">
+                <p className="text-sm text-slate-300 font-semibold">
+                  Pronto para encontrar os teus primeiros clientes reais!
+                </p>
+                <p className="text-xs text-slate-400">
+                  Escolhe acima o nicho (ex: <strong>Barbearia</strong> ou <strong>Pizzaria</strong>) e a cidade (ex: <strong>Guaíra SP</strong>) e toca em <strong>Buscar Empresas Reais</strong>.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {huntedLeads.map((lead) => (
+                  <div
+                    key={lead.id}
+                    className="bg-slate-900 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-4 flex flex-col justify-between space-y-3 transition"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <h3 className="text-sm font-bold text-white">{lead.business_name}</h3>
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-bold shrink-0">
+                          R$ {lead.price_brl}/mês
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 text-[11px]">
+                        <span className="text-cyan-300 font-medium">📍 {lead.city}</span>
+                        {lead.phone_display && (
+                          <span className="text-emerald-400 font-mono font-bold">
+                            📞 {lead.phone_display}
+                          </span>
+                        )}
+                        {lead.instagram && (
+                          <span className="text-pink-300 font-semibold">{lead.instagram}</span>
+                        )}
+                      </div>
+
+                      {lead.snippet && (
+                        <p className="text-xs text-slate-400 line-clamp-2">{lead.snippet}</p>
+                      )}
+
+                      <div className="bg-slate-950 border border-slate-800/80 rounded-xl p-2.5 text-[11px] text-slate-300 whitespace-pre-line">
+                        {lead.whatsapp_pitch}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <a
+                        href={lead.whatsapp_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex-1 min-w-[155px] py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        {lead.phone_digits ? 'Enviar no WhatsApp Direto' : 'Abrir Msg no WhatsApp'}
+                      </a>
+
+                      <a
+                        href={lead.maps_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="py-2 px-3 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-300 font-bold text-xs flex items-center gap-1 transition"
+                        title="Abrir ficha e telefone oficial deste local no Google Maps"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        Maps / Telefone
+                      </a>
+
+                      <a
+                        href={lead.source_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="py-2 px-3 rounded-xl bg-pink-500/15 hover:bg-pink-500/25 border border-pink-500/40 text-pink-300 font-bold text-xs flex items-center gap-1 transition"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        Perfil / Site
+                      </a>
+
+                      <button
+                        onClick={() => createPixForRealLead(lead)}
+                        disabled={busy}
+                        className="py-2 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 font-bold text-xs flex items-center gap-1 cursor-pointer transition"
+                      >
+                        <QrCode className="w-3.5 h-3.5" />
+                        Emitir Pix Asaas
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* =================================================================
             TAB 0: PORTFÓLIO DE EMPRESAS COMERCIAIS & VENTURE BUILDER LIVE

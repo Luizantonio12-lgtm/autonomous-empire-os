@@ -671,18 +671,6 @@ if __name__ == "__main__":
                 ),
             )
 
-            if contract_value_usd > 0:
-                await FinancialLedgerInterceptor.record_custom_transaction(
-                    db=db,
-                    entry_type="REVENUE",
-                    category="SOFTWARE_CONTRACT",
-                    amount_usd=contract_value_usd,
-                    description=f"Deploy Git #{commit_hash}: '{name}' ({client_name})",
-                    agent_id=cls.AGENT_ID,
-                    task_id=task_id,
-                    metadata={"project_id": project_id, "git_commit": commit_hash},
-                )
-
             await event_bus.publish(
                 event_type="FACTORY_DEPLOY_SUCCESS",
                 agent_slug="software-factory",

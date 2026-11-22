@@ -31,15 +31,18 @@ class MasterOrchestratorAgent:
             payload={"task_id": task_id},
         )
 
-        # Contabiliza inferência de roteamento do Orquestrador Mestre
+        from packages.llm_router.vault import ConfigVault
+
+        has_free_gemini = bool(await ConfigVault.get_secret(db, "GEMINI_API_KEY"))
+        # Contabiliza inferência de roteamento do Orquestrador Mestre ($0.00 no Gemini Free Tier)
         await FinancialLedgerInterceptor.record_llm_usage(
             db=db,
             agent_id=cls.AGENT_ID,
             task_id=task_id,
-            model="gpt-4o-mini",
-            prompt_tokens=420,
-            completion_tokens=165,
-            operation_label="Roteamento e Decomposição Estratégica (Orquestrador Mestre)",
+            model="gemini-3-flash-preview" if has_free_gemini else "gpt-4o-mini",
+            prompt_tokens=180,
+            completion_tokens=45,
+            operation_label="Roteamento Estratégico (Orquestrador Mestre)",
         )
 
         # Se o utilizador especificou um departamento explícito ou um sub-agente dinâmico
