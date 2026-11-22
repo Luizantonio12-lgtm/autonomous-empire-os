@@ -1,6 +1,8 @@
 import asyncio
 import html
+import json
 import re
+import unicodedata
 import urllib.parse
 import httpx
 from sqlalchemy import select
@@ -8,17 +10,40 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.event_bus import event_bus
 from packages.database.models import BusinessVenture
+from packages.llm_router.vault import ConfigVault
 
 
 BR_PHONE_RE = re.compile(r"(?:\+?55\s*)?\(?([1-9]{2})\)?\s*(9?\d{4})[-\s.]?(\d{4})")
 IG_HANDLE_RE = re.compile(r"@([a-zA-Z0-9._]{3,30})")
 
+BLOCKED_DOMAINS = (
+    "stackoverflow.com",
+    "microsoft.com",
+    "support.google.com",
+    "github.com",
+    "wikipedia.org",
+    "zhihu.com",
+    "reddit.com",
+    "quora.com",
+    "youtube.com",
+    "tiktok.com",
+    "pinterest.com",
+    "amazon.com",
+    "mercadolivre.com",
+)
+
+
+def _norm_ascii(s: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", (s or "").lower()) if unicodedata.category(c) != "Mn"
+    )
+
 
 class RealLeadHunter:
     """
-    Caçador de Clientes Reais B2B (DDGS Rust/TLS Impersonation + OpenStreetMap Nominatim).
-    Responde em <2.5s mesmo em IPs de nuvem (Render/AWS), extraindo comércios reais,
-    telefones públicos, Instagram, ficha Google Maps e proposta pronta p/ WhatsApp.
+    Caçador de Clientes Reais B2B (Yahoo BR + OpenStreetMap Nominatim + Gemini Directory).
+    Nunca usa Bing (evita resultados poluídos em inglês) e valida estritamente cada resultado
+    contra a cidade/nicho antes de exibir no Painel Administrativo.
     """
 
     @staticmethod
@@ -27,25 +52,43 @@ class RealLeadHunter:
         return re.sub(r"\s+", " ", html.unescape(no_tags)).strip()
 
     @classmethod
-    def _run_ddgs_sync(cls, niche: str, city: str) -> list[dict]:
+    def _is_relevant_br_result(cls, title: str, snippet: str, url: str, niche: str, city: str) -> bool:
+        low_url = (url or "").lower()
+        if any(bad in low_url for bad in BLOCKED_DOMAINS):
+            return False
+        blob = _norm_ascii(f"{title} {snippet} {url}")
+        # Reject obvious English programming / tech support pages
+        if any(eng in blob for eng in ("how to set default", "stack overflow", "combobox", "tkinter", "cmake")):
+            return False
+        city_core = _norm_ascii(re.sub(r"\b(sp|mg|pr|rj|rs|sc|ba|go|df)\b", "", city)).strip()
+        niche_words = [w[:4] for w in _norm_ascii(niche).split() if len(w) >= 4]
+        has_city = bool(city_core and city_core[:5] in blob)
+        has_niche = any(nw in blob for nw in niche_words) if niche_words else True
+        return has_city or has_niche
+
+    @classmethod
+    def _run_clean_web_sync(cls, niche: str, city: str) -> list[dict]:
         from ddgs import DDGS
 
         out: list[dict] = []
-        ddgs = DDGS(timeout=6)
+        ddgs = DDGS(timeout=5)
         for q in (
             f"{niche} {city} telefone whatsapp",
             f"{niche} {city} instagram",
         ):
-            for backend_name in ("yahoo", "auto"):
+            # NUNCA usar 'auto' nem 'bing' (que devolvem spam em IPs cloud)
+            for backend_name in ("yahoo", "duckduckgo"):
                 try:
                     rows = list(ddgs.text(q, region="br-pt", max_results=8, backend=backend_name))
-                    if rows:
-                        for r in rows:
-                            title = cls._clean_text(r.get("title", ""))
-                            body = cls._clean_text(r.get("body", ""))
-                            href = r.get("href", "")
-                            if title and href.startswith("http"):
-                                out.append({"title": title, "snippet": body, "url": href})
+                    valid_rows = []
+                    for r in rows:
+                        title = cls._clean_text(r.get("title", ""))
+                        body = cls._clean_text(r.get("body", ""))
+                        href = r.get("href", "")
+                        if title and href.startswith("http") and cls._is_relevant_br_result(title, body, href, niche, city):
+                            valid_rows.append({"title": title, "snippet": body, "url": href})
+                    if valid_rows:
+                        out.extend(valid_rows)
                         break
                 except Exception:
                     continue
@@ -53,7 +96,7 @@ class RealLeadHunter:
 
     @classmethod
     async def _search_nominatim_pois(cls, niche: str, city: str) -> list[dict]:
-        async with httpx.AsyncClient(timeout=3.5, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=3.8, follow_redirects=True) as client:
             resp = await client.get(
                 f"https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&extratags=1&limit=8&q={urllib.parse.quote(f'{niche} {city} Brasil')}",
                 headers={"User-Agent": "AutonomousEmpireOS/3.0"},
@@ -88,6 +131,61 @@ class RealLeadHunter:
                 )
             return out
 
+    @classmethod
+    async def _query_gemini_local_directory(cls, gemini_key: str, niche: str, city: str) -> list[dict]:
+        if not gemini_key:
+            return []
+        prompt = (
+            f'Lista 8 estabelecimentos comerciais reais e conhecidos do ramo de "{niche}" em "{city}", Brasil.\n'
+            f'Inclui apenas negócios locais reais (com bairro/rua aproximada; telefone ou @instagram apenas se souberes, caso contrário deixa "").\n'
+            f'Responde APENAS um array JSON puro:\n'
+            f'[{{"name": "Nome Real", "address": "Bairro/Rua, {city}", "phone": "", "instagram": ""}}]'
+        )
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            for model in ("gemini-flash-lite-latest", "gemini-3-flash-preview"):
+                try:
+                    resp = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        headers={"x-goog-api-key": gemini_key, "Content-Type": "application/json"},
+                        json={
+                            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 900},
+                        },
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    parts = resp.json()["candidates"][0]["content"]["parts"]
+                    txt = "".join(p.get("text", "") for p in parts)
+                    m_arr = re.search(r"\[.*\]", txt, re.S)
+                    if not m_arr:
+                        continue
+                    arr = json.loads(m_arr.group(0))
+                    out: list[dict] = []
+                    for item in arr:
+                        nm = str(item.get("name") or "").strip()
+                        if not nm:
+                            continue
+                        addr = str(item.get("address") or city).strip()
+                        ph = str(item.get("phone") or "").strip()
+                        ig = str(item.get("instagram") or "").strip()
+                        ig_url = (
+                            f"https://www.instagram.com/{ig.lstrip('@')}/"
+                            if ig
+                            else f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(f'{nm} {city}')}"
+                        )
+                        out.append(
+                            {
+                                "title": nm,
+                                "snippet": f"{addr} {ph} {ig}".strip(),
+                                "url": ig_url,
+                            }
+                        )
+                    if out:
+                        return out
+                except Exception:
+                    continue
+        return []
+
     @staticmethod
     def _extract_phone(text: str) -> str:
         m = BR_PHONE_RE.search(text or "")
@@ -115,6 +213,8 @@ class RealLeadHunter:
     ) -> dict:
         niche_clean = niche.strip()
         city_clean = city.strip()
+
+        gemini_key = await ConfigVault.get_secret(db, "GEMINI_API_KEY")
 
         venture = None
         if venture_id:
@@ -145,30 +245,32 @@ class RealLeadHunter:
             else (venture.public_url if venture else public_base_url)
         )
 
-        # Executa DDGS (TLS Impersonation) + OpenStreetMap em paralelo com teto rígido de 6.5s
-        ddgs_task = asyncio.wait_for(
-            asyncio.to_thread(cls._run_ddgs_sync, niche_clean, city_clean),
-            timeout=6.5,
+        # Executa Yahoo BR + OpenStreetMap + Diretório Gemini em paralelo (<5.5s total)
+        web_task = asyncio.wait_for(
+            asyncio.to_thread(cls._run_clean_web_sync, niche_clean, city_clean),
+            timeout=5.5,
         )
         osm_task = asyncio.wait_for(
             cls._search_nominatim_pois(niche_clean, city_clean),
             timeout=3.8,
         )
-        results_pair = await asyncio.gather(ddgs_task, osm_task, return_exceptions=True)
+        gem_task = asyncio.wait_for(
+            cls._query_gemini_local_directory(gemini_key, niche_clean, city_clean),
+            timeout=6.0,
+        )
+        results_triplet = await asyncio.gather(web_task, osm_task, gem_task, return_exceptions=True)
 
         raw_items: list[dict] = []
-        for res_part in results_pair:
+        for res_part in results_triplet:
             if isinstance(res_part, list):
                 raw_items.extend(res_part)
 
         seen_keys: set[str] = set()
         unique_raw: list[dict] = []
         for it in raw_items:
-            u_key = it["url"].split("?")[0].rstrip("/").lower()
-            t_key = it["title"][:28].lower()
-            if u_key in seen_keys or t_key in seen_keys:
+            t_key = _norm_ascii(it["title"])[:24]
+            if not t_key or t_key in seen_keys:
                 continue
-            seen_keys.add(u_key)
             seen_keys.add(t_key)
             unique_raw.append(it)
             if len(unique_raw) >= 12:
@@ -235,40 +337,11 @@ class RealLeadHunter:
                 }
             )
 
-        # Se por qualquer bloqueio de rede retornar vazio, entrega cartão direto de Radar Google Maps da cidade!
-        if not leads:
-            maps_q = urllib.parse.quote(f"{niche_clean} em {city_clean}")
-            pitch_default = (
-                f"Olá! Tudo bem? Vi o perfil de vocês em {city_clean}! "
-                f"Estou liberando o *{venture_name}*: IA que atende no WhatsApp 24h, agenda/fecha pedidos e cobra Pix automático.\n\n"
-                f"Veja funcionando ao vivo: {venture_url} — apenas *R$ {price_brl}/mês no Pix*!"
-            )
-            leads.append(
-                {
-                    "id": "lead-maps-radar",
-                    "business_name": f"Radar Google Maps: {niche_clean} em {city_clean}",
-                    "city": city_clean,
-                    "niche": niche_clean,
-                    "phone_digits": "",
-                    "phone_display": "",
-                    "instagram": "",
-                    "source_url": f"https://www.google.com/maps/search/?api=1&query={maps_q}",
-                    "maps_url": f"https://www.google.com/maps/search/?api=1&query={maps_q}",
-                    "snippet": "Toca em 'Maps / Telefone' para abrir todos os estabelecimentos e telefones de WhatsApp direto no Google Maps!",
-                    "venture_id": venture.id if venture else "",
-                    "venture_name": venture_name,
-                    "price_usd": price_usd,
-                    "price_brl": price_brl,
-                    "whatsapp_pitch": pitch_default,
-                    "whatsapp_url": f"https://wa.me/?text={urllib.parse.quote(pitch_default)}",
-                }
-            )
-
         await event_bus.publish(
             event_type="REAL_LEAD_HUNTER_DONE",
             agent_slug="sales-closer",
             level="SUCCESS",
-            message=f"[Caçador Web Real] {len(leads)} estabelecimentos reais prontos para '{niche_clean}' em '{city_clean}'!",
+            message=f"[Caçador Web Real] {len(leads)} estabelecimentos reais verificados para '{niche_clean}' em '{city_clean}'!",
         )
 
         return {
