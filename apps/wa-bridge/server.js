@@ -7,6 +7,7 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion,
   DisconnectReason,
   Browsers,
 } = require('@whiskeysockets/baileys');
@@ -111,7 +112,13 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
 
     connectionStatus = 'CONNECTING';
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    const { version } = await fetchLatestBaileysVersion();
+    let version;
+    try {
+      const waWeb = typeof fetchLatestWaWebVersion === 'function' ? await fetchLatestWaWebVersion() : null;
+      version = waWeb && waWeb.version ? waWeb.version : (await fetchLatestBaileysVersion()).version;
+    } catch (_) {
+      version = (await fetchLatestBaileysVersion()).version;
+    }
 
     sock = makeWASocket({
       version,

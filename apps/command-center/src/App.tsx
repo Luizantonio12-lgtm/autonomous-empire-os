@@ -2794,12 +2794,18 @@ export default function App() {
                           onChange={(e) => setPairPhone(e.target.value)}
                           className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white"
                         />
-                        <div className="flex gap-2">
+                        <div className="flex flex-wrap gap-2">
                           <button
                             onClick={confirmWhatsAppPair}
                             className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs cursor-pointer"
                           >
-                            Confirmar Pareamento
+                            Gerar Código 8 Dígitos
+                          </button>
+                          <button
+                            onClick={fetchOverview}
+                            className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 font-bold text-xs cursor-pointer"
+                          >
+                            Já Digitei no WhatsApp (Verificar)
                           </button>
                           <button
                             onClick={refreshWhatsAppQR}

@@ -8,6 +8,7 @@ RUN npm run build
 FROM node:20-slim AS wa-bridge-builder
 WORKDIR /wa
 COPY apps/wa-bridge/package.json ./
+COPY apps/wa-bridge/patches ./patches
 RUN npm install --omit=dev --no-audit --no-fund
 COPY apps/wa-bridge/server.js ./
 
