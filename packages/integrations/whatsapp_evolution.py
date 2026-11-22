@@ -39,6 +39,8 @@ class EvolutionWhatsAppManager:
                     if data.get("qr_svg"):
                         cls._state["qr_svg"] = data["qr_svg"]
                     cls._state["sent_count"] = data.get("sent_count", 0)
+                    cls._state["last_event"] = data.get("last_event", "")
+                    cls._state["last_error"] = data.get("last_error", "")
                     cls._state["mode"] = "LIVE_BAILEYS_BRIDGE"
         except Exception:
             pass
@@ -78,6 +80,7 @@ class EvolutionWhatsAppManager:
             cls._state["status"] = data.get("status", "PAIRING_CODE_READY")
             cls._state["pairing_code"] = data.get("pairing_code") or ""
             cls._state["paired_number"] = data.get("phone")
+            cls._state["last_event"] = data.get("last_event", "")
             await event_bus.publish(
                 event_type="WHATSAPP_PAIR_CODE_READY",
                 agent_slug="support-24h",

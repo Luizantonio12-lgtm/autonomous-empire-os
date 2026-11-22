@@ -1,17 +1,17 @@
 diff --git a/node_modules/@whiskeysockets/baileys/lib/Socket/messages-recv.js b/node_modules/@whiskeysockets/baileys/lib/Socket/messages-recv.js
-index f2003ac..1f72102 100644
+index f2003ac..8e19dd6 100644
 --- a/node_modules/@whiskeysockets/baileys/lib/Socket/messages-recv.js
 +++ b/node_modules/@whiskeysockets/baileys/lib/Socket/messages-recv.js
 @@ -880,6 +880,7 @@ export const makeMessagesRecvSocket = (config) => {
                  break;
              case 'link_code_companion_reg':
                  const linkCodeCompanionReg = getBinaryNodeChild(node, 'link_code_companion_reg');
-+                if (!getBinaryNodeChildBuffer(linkCodeCompanionReg, 'primary_identity_pub')) { break; }
++                if (linkCodeCompanionReg?.attrs?.stage !== 'primary_hello' || !getBinaryNodeChildBuffer(linkCodeCompanionReg, 'primary_identity_pub')) { break; }
                  const ref = toRequiredBuffer(getBinaryNodeChildBuffer(linkCodeCompanionReg, 'link_code_pairing_ref'));
                  const primaryIdentityPublicKey = toRequiredBuffer(getBinaryNodeChildBuffer(linkCodeCompanionReg, 'primary_identity_pub'));
                  const primaryEphemeralPublicKeyWrapped = toRequiredBuffer(getBinaryNodeChildBuffer(linkCodeCompanionReg, 'link_code_pairing_wrapped_primary_ephemeral_pub'));
 diff --git a/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js b/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js
-index ae34a8f..944188d 100644
+index ae34a8f..301e075 100644
 --- a/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js
 +++ b/node_modules/@whiskeysockets/baileys/lib/Socket/socket.js
 @@ -6,7 +6,7 @@ import { proto } from '../../WAProto/index.js';
@@ -23,6 +23,33 @@ index ae34a8f..944188d 100644
  import { assertNodeErrorFree, binaryNodeToString, encodeBinaryNode, getAllBinaryNodeChildren, getBinaryNodeChild, getBinaryNodeChildren, isLidUser, jidDecode, jidEncode, S_WHATSAPP_NET } from '../WABinary/index.js';
  import { BinaryInfo } from '../WAM/BinaryInfo.js';
  import { USyncQuery, USyncUser } from '../WAUSync/index.js';
+@@ -317,7 +317,7 @@ export const makeSocket = (config) => {
+         logger.trace({ handshake }, 'handshake recv from WA');
+         const keyEnc = noise.processHandshake(handshake, creds.noiseKey);
+         let node;
+-        if (!creds.me) {
++        if (!creds.me || (!!creds.pairingCode && !creds.registered)) {
+             node = generateRegistrationNode(creds, config);
+             logger.info({ node }, 'not logged in, attempting registration...');
+         }
+@@ -604,7 +604,7 @@ export const makeSocket = (config) => {
+             name: '~'
+         };
+         ev.emit('creds.update', authState.creds);
+-        await sendNode({
++        await query({
+             tag: 'iq',
+             attrs: {
+                 to: S_WHATSAPP_NET,
+@@ -644,7 +644,7 @@ export const makeSocket = (config) => {
+                         {
+                             tag: 'link_code_pairing_nonce',
+                             attrs: {},
+-                            content: '0'
++                            content: Buffer.alloc(1)
+                         }
+                     ]
+                 }
 @@ -690,6 +690,9 @@ export const makeSocket = (config) => {
      ws.on('close', () => void end(new Boom('Connection Terminated', { statusCode: DisconnectReason.connectionClosed })));
      // the server terminated the connection
@@ -218,3 +245,17 @@ index f5edebd..5021c8f 100644
 +};
  //# sourceMappingURL=companion-reg-client-utils.js.map
 \ No newline at end of file
+diff --git a/node_modules/@whiskeysockets/baileys/lib/Utils/validate-connection.js b/node_modules/@whiskeysockets/baileys/lib/Utils/validate-connection.js
+index 6a65a73..dc8517d 100644
+--- a/node_modules/@whiskeysockets/baileys/lib/Utils/validate-connection.js
++++ b/node_modules/@whiskeysockets/baileys/lib/Utils/validate-connection.js
+@@ -191,7 +191,8 @@ export const configureSuccessfulPairing = (stanza, { advSecretKey, signedIdentit
+         account,
+         me: { id: jid, name: bizName, lid },
+         signalIdentities: [...(signalIdentities || []), identity],
+-        platform: platformNode?.attrs.name
++        platform: platformNode?.attrs.name,
++        registered: true
+     };
+     return {
+         creds: authUpdate,

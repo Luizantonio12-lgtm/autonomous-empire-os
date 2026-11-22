@@ -23,6 +23,9 @@ let currentPairingCode = '';
 let connectedPhone = '';
 let sentCount = 0;
 let starting = false;
+let lastBridgeEvent = 'boot';
+let lastBridgeError = '';
+let reconnectTimer = null;
 
 // Guarda APENAS os números/JIDs comerciais abordados pelos Agentes (protege conversas pessoais do dono!)
 const commercialContacts = new Set();
@@ -41,6 +44,17 @@ function clearAuthDir() {
       fs.rmSync(AUTH_DIR, { recursive: true, force: true });
     }
   } catch (_) {}
+}
+
+function hasRegisteredCreds() {
+  try {
+    const credsPath = path.join(AUTH_DIR, 'creds.json');
+    if (!fs.existsSync(credsPath)) return false;
+    const data = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+    return Boolean(data && (data.registered === true || data.account));
+  } catch (_) {
+    return false;
+  }
 }
 
 function extractMessageText(msg) {
@@ -95,6 +109,10 @@ function postJsonLocal(urlPath, payload) {
 async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
   if (starting) return;
   starting = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   try {
     if (sock) {
       try {
@@ -107,11 +125,22 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
       clearAuthDir();
       currentPairingCode = '';
       currentQrSvg = '';
+      lastBridgeError = '';
     }
     fs.mkdirSync(AUTH_DIR, { recursive: true });
 
     connectionStatus = 'CONNECTING';
+    lastBridgeEvent = resetAuth ? 'starting_fresh_socket' : 'reconnecting_saved_session';
+
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    let saveChain = Promise.resolve();
+    const enqueueSaveCreds = () => {
+      saveChain = saveChain.then(() => saveCreds()).catch((err) => {
+        console.error('[WA-BRIDGE] saveCreds error:', err?.message);
+      });
+      return saveChain;
+    };
+
     let version;
     try {
       const waWeb = typeof fetchLatestWaWebVersion === 'function' ? await fetchLatestWaWebVersion() : null;
@@ -120,22 +149,49 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
       version = (await fetchLatestBaileysVersion()).version;
     }
 
-    sock = makeWASocket({
+    const activeSock = makeWASocket({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
-      browser: Browsers.ubuntu('Chrome'),
+      browser: Browsers.macOS('Chrome'),
       printQRInTerminal: false,
       syncFullHistory: false,
       markOnlineOnConnect: false,
     });
+    sock = activeSock;
 
     let pairingRequested = false;
 
-    sock.ev.on('creds.update', saveCreds);
+    // Telemetria dos frames de pareamento para diagnóstico em tempo real
+    if (activeSock.ws && typeof activeSock.ws.on === 'function') {
+      activeSock.ws.on('frame', (frame) => {
+        try {
+          if (frame?.tag === 'notification' && frame?.attrs?.type === 'link_code_companion_reg') {
+            const child = Array.isArray(frame.content)
+              ? frame.content.find((c) => c?.tag === 'link_code_companion_reg')
+              : null;
+            const stage = child?.attrs?.stage || 'ack_ref';
+            lastBridgeEvent = `notif_link_code:${stage}`;
+          } else if (frame?.tag === 'iq' && Array.isArray(frame.content)) {
+            if (frame.content.some((c) => c?.tag === 'pair-success')) {
+              lastBridgeEvent = 'pair_success_received';
+            }
+          }
+        } catch (_) {}
+      });
+    }
 
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+    activeSock.ev.on('creds.update', () => {
+      enqueueSaveCreds();
+    });
+
+    activeSock.ev.on('connection.update', async (update) => {
+      if (activeSock !== sock) return;
+      const { connection, lastDisconnect, qr, isNewLogin } = update;
+
+      if (isNewLogin) {
+        lastBridgeEvent = 'new_login_configured_awaiting_515';
+      }
 
       if (qr) {
         try {
@@ -145,15 +201,19 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
           }
         } catch (_) {}
 
-        if (pairingPhone && !pairingRequested && !sock.authState.creds.registered) {
+        if (pairingPhone && !pairingRequested && !activeSock.authState.creds.registered) {
           pairingRequested = true;
           try {
-            const rawCode = await sock.requestPairingCode(pairingPhone);
+            lastBridgeEvent = `requesting_companion_hello:${pairingPhone}`;
+            const rawCode = await activeSock.requestPairingCode(pairingPhone);
             currentPairingCode =
               rawCode && rawCode.length === 8 ? `${rawCode.slice(0, 4)}-${rawCode.slice(4)}` : rawCode;
             connectionStatus = 'PAIRING_CODE_READY';
+            lastBridgeEvent = `companion_hello_accepted:${pairingPhone}`;
           } catch (err) {
-            console.error('Pairing code error:', err?.message);
+            lastBridgeError = err?.message || 'PAIRING_CODE_FAILED';
+            lastBridgeEvent = `companion_hello_error:${lastBridgeError}`;
+            console.error('[WA-BRIDGE] Pairing code error:', lastBridgeError);
           }
         }
       }
@@ -162,30 +222,49 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
         connectionStatus = 'CONNECTED';
         currentQrSvg = '';
         currentPairingCode = '';
-        const meId = sock?.user?.id || '';
+        lastBridgeError = '';
+        const meId = activeSock?.user?.id || activeSock?.authState?.creds?.me?.id || '';
         connectedPhone = meId.split(':')[0].split('@')[0] || connectedPhone;
+        lastBridgeEvent = `connected:${connectedPhone}`;
         console.log('[WA-BRIDGE] WhatsApp REAL conectado:', connectedPhone);
       }
 
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const errMsg = lastDisconnect?.error?.message || '';
         const loggedOut = statusCode === DisconnectReason.loggedOut;
+        const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
+
+        await saveChain;
+
         if (loggedOut) {
           clearAuthDir();
           connectionStatus = 'DISCONNECTED';
           connectedPhone = '';
+          currentPairingCode = '';
+          lastBridgeEvent = `logged_out:${statusCode}`;
+        } else if (isRestartRequired || hasRegisteredCreds()) {
+          // 515 restartRequired logo após confirmar no celular -> reconecta imediatamente com as credenciais salvas!
+          connectionStatus = 'CONNECTING';
+          currentPairingCode = '';
+          lastBridgeEvent = `restarting_authenticated_session:${statusCode || 515}`;
+          const delayMs = isRestartRequired ? 400 : 2500;
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            startSocket({ resetAuth: false });
+          }, delayMs);
         } else {
+          // Sessão não concluída expirou (ex: 408 QR timeout): limpa credenciais parciais
+          clearAuthDir();
           connectionStatus = 'DISCONNECTED';
-          // Reconexão suave caso já tivesse sessão registada
-          if (fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
-            setTimeout(() => startSocket({ resetAuth: false }), 4000);
-          }
+          currentPairingCode = '';
+          lastBridgeEvent = `unpaired_socket_closed:${statusCode || 'unknown'}:${errMsg}`;
         }
       }
     });
 
     // Recebe respostas dos clientes abordados e aciona o Closer IA + Pix Asaas!
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    activeSock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
       for (const msg of messages || []) {
         if (!msg?.message || msg.key.fromMe) continue;
@@ -235,9 +314,11 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
   }
 }
 
-// Se já existir credencial salva em disco, reconecta ao arrancar
-if (fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
+// Se já existir credencial registada em disco, reconecta ao arrancar
+if (hasRegisteredCreds()) {
   startSocket({ resetAuth: false });
+} else {
+  clearAuthDir();
 }
 
 function readJson(req) {
@@ -267,13 +348,14 @@ const server = http.createServer(async (req, res) => {
         pairing_code: currentPairingCode,
         sent_count: sentCount,
         tracked_leads: commercialContacts.size,
+        last_event: lastBridgeEvent,
+        last_error: lastBridgeError,
       })
     );
   }
 
   if (req.method === 'POST' && req.url === '/connect-qr') {
     await startSocket({ resetAuth: connectionStatus === 'DISCONNECTED' });
-    // Aguarda até 4s pelo primeiro QR
     for (let i = 0; i < 16; i++) {
       if (currentQrSvg || connectionStatus === 'CONNECTED') break;
       await new Promise((r) => setTimeout(r, 250));
@@ -285,6 +367,7 @@ const server = http.createServer(async (req, res) => {
         phone: connectedPhone,
         qr_svg: currentQrSvg,
         pairing_code: currentPairingCode,
+        last_event: lastBridgeEvent,
       })
     );
   }
@@ -294,12 +377,22 @@ const server = http.createServer(async (req, res) => {
     const digits = cleanDigits(body.phone);
     if (digits.length < 12) {
       res.statusCode = 400;
-      return res.end(JSON.stringify({ ok: false, error: 'Informe DDD + Número (ex: 5517999999999)' }));
+      return res.end(JSON.stringify({ ok: false, error: 'Informe DDD + Número (ex: 5516993862008)' }));
     }
     await startSocket({ resetAuth: true, pairingPhone: digits });
-    for (let i = 0; i < 28; i++) {
-      if (currentPairingCode || connectionStatus === 'CONNECTED') break;
+    for (let i = 0; i < 35; i++) {
+      if (currentPairingCode || connectionStatus === 'CONNECTED' || lastBridgeError) break;
       await new Promise((r) => setTimeout(r, 300));
+    }
+    if (!currentPairingCode && lastBridgeError) {
+      res.statusCode = 502;
+      return res.end(
+        JSON.stringify({
+          ok: false,
+          error: `WhatsApp rejeitou solicitação de código: ${lastBridgeError}`,
+          last_event: lastBridgeEvent,
+        })
+      );
     }
     return res.end(
       JSON.stringify({
@@ -307,6 +400,7 @@ const server = http.createServer(async (req, res) => {
         status: connectionStatus,
         pairing_code: currentPairingCode,
         phone: digits,
+        last_event: lastBridgeEvent,
       })
     );
   }
@@ -325,7 +419,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      // Verifica se o número comercial (mesmo fixo c/ WhatsApp Business, ou c/ e s/ 9º dígito BR) tem WhatsApp ativo!
       const candidates = [digits];
       if (digits.startsWith('55') && digits.length === 13 && digits[4] === '9') {
         candidates.push('55' + digits.slice(2, 4) + digits.slice(5));
@@ -373,6 +466,7 @@ const server = http.createServer(async (req, res) => {
     connectedPhone = '';
     currentQrSvg = '';
     currentPairingCode = '';
+    lastBridgeEvent = 'disconnected_by_admin';
     return res.end(JSON.stringify({ ok: true, status: 'DISCONNECTED' }));
   }
 

@@ -2776,7 +2776,14 @@ export default function App() {
                     </div>
                     <div>
                       <span className="text-slate-400">Pairing Code:</span>{' '}
-                      <strong className="font-mono text-emerald-400">
+                      <strong
+                        onClick={() =>
+                          waState?.pairing_code &&
+                          navigator.clipboard.writeText(waState.pairing_code.replace('-', ''))
+                        }
+                        title="Toque para copiar os 8 dígitos sem traço"
+                        className="font-mono text-emerald-400 cursor-pointer underline decoration-dotted"
+                      >
                         {waState?.pairing_code}
                       </strong>
                     </div>
