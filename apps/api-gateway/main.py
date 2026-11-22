@@ -939,12 +939,15 @@ async def reset_to_strict_real_treasury_mode(db: AsyncSession = Depends(get_db))
     # 1. Desliga Piloto Automático simulado
     await AutonomousSchedulerDaemon.set_autopilot(False)
 
-    # 2. Remove faturas fictícias de demonstração inicial
-    await db.execute(
-        delete(PaymentInvoice).where(
-            PaymentInvoice.client_name.in_(["Construtora Horizonte S.A.", "Nordic Cloud Ventures"])
-        )
-    )
+    # 2. Remove faturas fictícias de demonstração (qualquer external_id simulado ext_...)
+    all_inv_res = await db.execute(select(PaymentInvoice))
+    for inv in all_inv_res.scalars().all():
+        if (inv.external_id or "").startswith("ext_") or inv.client_name in (
+            "Construtora Horizonte S.A.",
+            "Nordic Cloud Ventures",
+        ):
+            await db.delete(inv)
+    await db.flush()
 
     # 3. Mantém no Ledger APENAS pagamentos reais liquidados via Gateway (Asaas/Stripe)
     paid_res = await db.execute(select(PaymentInvoice).where(PaymentInvoice.status == "PAID"))
