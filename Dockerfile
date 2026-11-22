@@ -5,6 +5,12 @@ RUN npm install
 COPY apps/command-center ./
 RUN npm run build
 
+FROM node:20-slim AS wa-bridge-builder
+WORKDIR /wa
+COPY apps/wa-bridge/package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+COPY apps/wa-bridge/server.js ./
+
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -19,7 +25,8 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY packages /app/packages
 COPY apps/api-gateway /app/apps/api-gateway
 COPY --from=frontend-builder /ui/dist /app/apps/command-center/dist
+COPY --from=wa-bridge-builder /wa /app/apps/wa-bridge
 
-RUN mkdir -p /app/deployments
+RUN mkdir -p /app/deployments /app/.wa_auth
 EXPOSE 10000
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --app-dir /app/apps/api-gateway"]
+CMD ["sh", "-c", "PORT=${PORT:-10000} WA_BRIDGE_PORT=3005 WA_AUTH_DIR=/app/.wa_auth node /app/apps/wa-bridge/server.js & uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --app-dir /app/apps/api-gateway"]

@@ -183,8 +183,92 @@ export default function App() {
   const [huntVentureId, setHuntVentureId] = useState('');
   const [huntedLeads, setHuntedLeads] = useState<RealLeadItem[]>([]);
   const [huntingLoading, setHuntingLoading] = useState(false);
+  const [myWaPhone, setMyWaPhone] = useState('');
+  const [pairCodeLoading, setPairCodeLoading] = useState(false);
+  const [autoOutreachMsg, setAutoOutreachMsg] = useState<string | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
+
+  const requestMyWaPairingCode = async () => {
+    const clean = myWaPhone.replace(/\D/g, '');
+    if (clean.length < 10) {
+      alert('Digita o teu DDD + Número do WhatsApp (ex: 17999998888)');
+      return;
+    }
+    setPairCodeLoading(true);
+    try {
+      const res = await fetch('/api/whatsapp/pair-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone_number: clean }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        alert(json.detail || 'Erro ao pedir código de pareamento.');
+      }
+      await fetchOverview();
+    } finally {
+      setPairCodeLoading(false);
+    }
+  };
+
+  const launchAutonomousOutreach = async () => {
+    setHuntingLoading(true);
+    setAutoOutreachMsg(null);
+    try {
+      const res = await fetch('/api/leads/auto-outreach', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          niche: huntNiche,
+          city: huntCity,
+          venture_id: huntVentureId || null,
+        }),
+      });
+      const json = await res.json();
+      if (!json.ok) {
+        setAutoOutreachMsg(
+          '⚠️ Conecta primeiro o teu WhatsApp no quadro abaixo com o Código de 8 Dígitos para os agentes enviarem mensagens sozinhos!'
+        );
+      } else {
+        if (json.leads) setHuntedLeads(json.leads);
+        setAutoOutreachMsg(
+          `✅ PILOTO COMERCIAL EM EXECUÇÃO! ${json.queued_with_phone} empresas reais com telefone entraram na fila automática (envio humano seguro a cada 25s). Quando responderem, o Agente Closer tira dúvidas e manda o teu Pix Asaas sozinho!`
+        );
+      }
+      await fetchOverview();
+    } finally {
+      setHuntingLoading(false);
+    }
+  };
+
+  const agentSendSingleNow = async (lead: RealLeadItem) => {
+    setBusy(true);
+    try {
+      const res = await fetch('/api/leads/send-one', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          business_name: lead.business_name,
+          phone_digits: lead.phone_digits,
+          message: lead.whatsapp_pitch,
+          venture_name: lead.venture_name,
+          price_usd: lead.price_usd,
+        }),
+      });
+      const json = await res.json();
+      if (json.ok) {
+        setAutoOutreachMsg(`✅ Agente enviou proposta no WhatsApp para ${lead.business_name}!`);
+      } else if (json.error === 'WHATSAPP_NOT_CONNECTED') {
+        setAutoOutreachMsg('⚠️ Conecta primeiro o teu WhatsApp com o Código de 8 Dígitos acima!');
+      } else {
+        setAutoOutreachMsg(`ℹ️ Este telefone (${lead.phone_display}) é apenas fixo sem conta WhatsApp ativa.`);
+      }
+      await fetchOverview();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1228,6 +1312,93 @@ export default function App() {
         ================================================================== */}
         {activeTab === 'LEAD_HUNTER' && (
           <div className="space-y-6">
+            {/* CENTRAL DE DISPARO & FECHAMENTO 100% AUTÓNOMO NO WHATSAPP */}
+            <div className="bg-gradient-to-r from-emerald-950/60 via-slate-900 to-slate-900 border border-emerald-500/40 rounded-2xl p-5 space-y-4 shadow-xl">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-bold text-emerald-300 flex items-center gap-2">
+                    <Bot className="w-5 h-5 text-emerald-400" />
+                    Agentes em Piloto Automático no WhatsApp (Enviam, Respondem & Mandam Pix Sozinhos!)
+                  </h2>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    Conecta o teu WhatsApp abaixo com o Código de 8 Dígitos (no próprio celular, sem precisar doutro aparelho). Os agentes falam apenas com as lojas abordadas (protege 100% as tuas conversas pessoais!).
+                  </p>
+                </div>
+                <span
+                  className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                    waState?.status === 'CONNECTED'
+                      ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300'
+                      : 'bg-amber-500/20 border-amber-400/50 text-amber-300'
+                  }`}
+                >
+                  {waState?.status === 'CONNECTED'
+                    ? `🟢 WhatsApp Ativo (+${waState.paired_number || 'Conectado'})`
+                    : '⚡ Falta Conectar Teu WhatsApp (10s)'}
+                </span>
+              </div>
+
+              {waState?.status !== 'CONNECTED' ? (
+                <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-3">
+                  <div className="flex flex-col sm:flex-row gap-2.5">
+                    <input
+                      value={myWaPhone}
+                      onChange={(e) => setMyWaPhone(e.target.value)}
+                      placeholder="Teu WhatsApp c/ DDD (ex: 17999998888)"
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500"
+                    />
+                    <button
+                      onClick={requestMyWaPairingCode}
+                      disabled={pairCodeLoading}
+                      className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-sm cursor-pointer transition"
+                    >
+                      {pairCodeLoading ? 'Gerando Código Oficial...' : '1. Gerar Código de 8 Dígitos'}
+                    </button>
+                  </div>
+
+                  {waState?.pairing_code && waState.status === 'PAIRING_CODE_READY' && (
+                    <div className="bg-emerald-950/50 border border-emerald-500/50 rounded-xl p-4 text-center space-y-2">
+                      <p className="text-xs text-emerald-200 font-semibold">
+                        TEU CÓDIGO OFICIAL DO WHATSAPP ( Toca para copiar ):
+                      </p>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(waState.pairing_code.replace('-', ''))}
+                        className="text-2xl sm:text-3xl font-mono font-extrabold tracking-widest text-white bg-slate-900 px-6 py-2.5 rounded-xl border border-emerald-400 cursor-pointer"
+                      >
+                        {waState.pairing_code}
+                      </button>
+                      <p className="text-xs text-slate-300">
+                        Agora abre o teu <strong>WhatsApp</strong> → <strong>3 pontinhos (⋮)</strong> →{' '}
+                        <strong>Aparelhos conectados</strong> → <strong>Conectar um aparelho</strong> → lá embaixo toca em{' '}
+                        <strong>&quot;Conectar com número de telefone&quot;</strong> e digita o código acima!
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    onClick={launchAutonomousOutreach}
+                    disabled={huntingLoading}
+                    className="px-5 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-extrabold text-sm flex items-center gap-2 shadow-lg shadow-emerald-500/25 cursor-pointer transition"
+                  >
+                    <Rocket className="w-4 h-4" />
+                    {huntingLoading
+                      ? 'Iniciando Disparo Automático...'
+                      : `🤖 Mandar Agentes Abordarem ${huntNiche} em ${huntCity} Sozinhos!`}
+                  </button>
+                  <span className="text-xs text-slate-400">
+                    Intervalo seguro anti-banimento (25s por loja) + Resposta & Pix Asaas 100% automáticos!
+                  </span>
+                </div>
+              )}
+
+              {autoOutreachMsg && (
+                <div className="bg-slate-950 border border-emerald-500/40 rounded-xl px-4 py-2.5 text-xs text-emerald-300 font-semibold">
+                  {autoOutreachMsg}
+                </div>
+              )}
+            </div>
+
             <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-5 space-y-4 shadow-xl">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
@@ -1383,6 +1554,17 @@ export default function App() {
                     </div>
 
                     <div className="flex flex-wrap gap-2 pt-1">
+                      {lead.phone_digits && waState?.status === 'CONNECTED' && (
+                        <button
+                          onClick={() => agentSendSingleNow(lead)}
+                          disabled={busy}
+                          className="flex-1 min-w-[165px] py-2 px-3 rounded-xl bg-violet-500 hover:bg-violet-400 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition"
+                        >
+                          <Bot className="w-3.5 h-3.5" />
+                          🤖 Agente Enviar Sozinho
+                        </button>
+                      )}
+
                       <a
                         href={lead.whatsapp_url}
                         target="_blank"

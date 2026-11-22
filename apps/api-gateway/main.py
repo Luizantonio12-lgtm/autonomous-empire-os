@@ -45,7 +45,7 @@ from packages.database import (  # noqa: E402
     init_database,
 )
 from packages.integrations import EvolutionWhatsAppManager  # noqa: E402
-from packages.leads import RealLeadHunter  # noqa: E402
+from packages.leads import AutonomousOutreachEngine, RealLeadHunter  # noqa: E402
 from packages.llm_router import ConfigVault  # noqa: E402
 from packages.memory import EmpireSemanticMemory  # noqa: E402
 from packages.orchestrator import execute_empire_directive  # noqa: E402
@@ -783,8 +783,20 @@ async def whatsapp_refresh_qr(db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/whatsapp/pair")
 async def whatsapp_confirm_pair(payload: PairWhatsAppRequest):
-    state = await EvolutionWhatsAppManager.confirm_pairing(payload.phone_number)
-    return {"ok": True, "whatsapp_instance": state}
+    try:
+        state = await EvolutionWhatsAppManager.confirm_pairing(payload.phone_number)
+        return {"ok": True, "whatsapp_instance": state}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/whatsapp/pair-code")
+async def whatsapp_request_pair_code(payload: PairWhatsAppRequest):
+    try:
+        state = await EvolutionWhatsAppManager.request_real_pairing_code(payload.phone_number)
+        return {"ok": True, "whatsapp_instance": state}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/whatsapp/disconnect")
@@ -916,6 +928,21 @@ class LeadHuntRequest(BaseModel):
     venture_id: str | None = None
 
 
+class SingleAutoSendRequest(BaseModel):
+    business_name: str
+    phone_digits: str
+    message: str
+    venture_name: str = "AgendaCorte Pro AI"
+    price_usd: float = 19.0
+
+
+class WaBridgeInboundRequest(BaseModel):
+    remote_jid: str = ""
+    phone: str
+    contact_name: str = "Cliente WhatsApp"
+    message: str
+
+
 @app.post("/api/leads/hunt")
 async def hunt_real_b2b_leads(
     payload: LeadHuntRequest,
@@ -932,6 +959,58 @@ async def hunt_real_b2b_leads(
         venture_id=payload.venture_id,
         public_base_url=base_url,
     )
+
+
+@app.post("/api/leads/auto-outreach")
+async def trigger_autonomous_whatsapp_outreach(
+    payload: LeadHuntRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    base_url = f"{request.url.scheme}://{request.url.netloc}"
+    if "127.0.0.1" in base_url or "localhost" in base_url:
+        base_url = "https://autonomous-empire-os.onrender.com"
+    return await AutonomousOutreachEngine.start_autonomous_batch(
+        db=db,
+        niche=payload.niche,
+        city=payload.city,
+        venture_id=payload.venture_id,
+        public_base_url=base_url,
+    )
+
+
+@app.post("/api/leads/send-one")
+async def send_single_lead_autonomous(
+    payload: SingleAutoSendRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    return await AutonomousOutreachEngine.send_single_lead_now(
+        db=db,
+        business_name=payload.business_name,
+        phone_digits=payload.phone_digits,
+        message=payload.message,
+        venture_name=payload.venture_name,
+        price_usd=payload.price_usd,
+    )
+
+
+@app.get("/api/leads/campaign-status")
+async def get_auto_campaign_status():
+    return {"ok": True, "stats": AutonomousOutreachEngine.get_campaign_status()}
+
+
+@app.post("/api/webhooks/wa-bridge-inbound")
+async def handle_wa_bridge_inbound(
+    payload: WaBridgeInboundRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    reply = await AutonomousOutreachEngine.handle_real_whatsapp_reply(
+        db=db,
+        phone=payload.phone,
+        contact_name=payload.contact_name,
+        message=payload.message,
+    )
+    return {"ok": True, "auto_reply": reply}
 
 
 @app.post("/api/system/reset-real-mode")

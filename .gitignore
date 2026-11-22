@@ -3,7 +3,9 @@ __pycache__/
 .venv/
 apps/command-center/node_modules/
 apps/command-center/dist/
-empire_state.db
+apps/wa-bridge/node_modules/
+.wa_auth/
+empire_state.db*
 deployments/
 backups/
 .env
