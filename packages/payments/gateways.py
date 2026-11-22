@@ -225,6 +225,18 @@ class PaymentGatewayManager:
 
         inv.status = "PAID"
         inv.paid_at = datetime.now(timezone.utc)
+
+        # Se a fatura corresponder a uma Empresa SaaS ativa, atualiza MRR e Clientes Pagantes automaticamente!
+        from packages.database.models import BusinessVenture
+
+        v_res = await db.execute(select(BusinessVenture))
+        for venture in v_res.scalars().all():
+            if venture.name.lower() in (inv.description or "").lower():
+                venture.active_customers = (venture.active_customers or 0) + 1
+                venture.mrr_usd = round((venture.mrr_usd or 0.0) + inv.amount_usd, 2)
+                venture.total_revenue_usd = round((venture.total_revenue_usd or 0.0) + inv.amount_usd, 2)
+                break
+
         await db.commit()
 
         await FinancialLedgerInterceptor.record_custom_transaction(
