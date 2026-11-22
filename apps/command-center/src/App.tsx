@@ -223,6 +223,8 @@ export default function App() {
     const c = overrideCity ?? huntCity;
     if (!n.trim() || !c.trim()) return;
     setHuntingLoading(true);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 14000);
     try {
       const selectedVen =
         huntVentureId ||
@@ -239,13 +241,16 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ niche: n, city: c, venture_id: selectedVen || null }),
+        signal: controller.signal,
       });
       if (res.ok) {
         const json = await res.json();
         setHuntedLeads(json.leads || []);
       }
-      await fetchOverview();
+    } catch {
+      // fallback safe: never freeze buttons
     } finally {
+      clearTimeout(timer);
       setHuntingLoading(false);
     }
   };

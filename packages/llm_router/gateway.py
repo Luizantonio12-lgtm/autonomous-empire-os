@@ -53,12 +53,14 @@ class MultiModelLLMGateway:
                 ("anthropic", "claude-3-5-sonnet", anthropic_key),
                 ("openai", "gpt-4o", openai_key),
                 ("gemini", "gemini-3-flash-preview", gemini_key),
+                ("gemini", "gemini-flash-lite-latest", gemini_key),
                 ("groq", "llama-3.3-70b-versatile", groq_key),
                 ("deepseek", "deepseek-reasoner", deepseek_key),
             ]
         else:
             candidates = [
                 ("gemini", "gemini-3-flash-preview", gemini_key),
+                ("gemini", "gemini-flash-lite-latest", gemini_key),
                 ("groq", "llama-3.3-70b-versatile", groq_key),
                 ("deepseek", "deepseek-chat", deepseek_key),
                 ("openai", "gpt-4o-mini", openai_key),

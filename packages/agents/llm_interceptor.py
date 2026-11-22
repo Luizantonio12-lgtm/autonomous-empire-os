@@ -10,6 +10,7 @@ from packages.database.models import AgentRegistry, FinancialLedger, TaskExecuti
 # Tabela Oficial de Preços por 1M Tokens (USD)
 MODEL_PRICING_PER_1M: dict[str, tuple[float, float]] = {
     "gemini-3-flash-preview": (0.0, 0.0),
+    "gemini-flash-lite-latest": (0.0, 0.0),
     "llama-3.3-70b-versatile": (0.0, 0.0),
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),

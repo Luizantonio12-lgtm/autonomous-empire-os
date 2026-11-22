@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from packages.database.models import Base
 
@@ -11,11 +12,24 @@ DATABASE_URL = os.getenv(
     f"sqlite+aiosqlite:///{DEFAULT_SQLITE_PATH}",
 )
 
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
+
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     future=True,
+    connect_args={"timeout": 20} if IS_SQLITE else {},
 )
+
+if IS_SQLITE:
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.execute("PRAGMA busy_timeout=15000;")
+        cursor.close()
+
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
