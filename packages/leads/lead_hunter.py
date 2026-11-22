@@ -31,21 +31,24 @@ class RealLeadHunter:
         from ddgs import DDGS
 
         out: list[dict] = []
-        ddgs = DDGS(timeout=5)
+        ddgs = DDGS(timeout=6)
         for q in (
             f"{niche} {city} telefone whatsapp",
             f"{niche} {city} instagram",
         ):
-            try:
-                rows = list(ddgs.text(q, region="br-pt", max_results=8))
-                for r in rows:
-                    title = cls._clean_text(r.get("title", ""))
-                    body = cls._clean_text(r.get("body", ""))
-                    href = r.get("href", "")
-                    if title and href.startswith("http"):
-                        out.append({"title": title, "snippet": body, "url": href})
-            except Exception:
-                continue
+            for backend_name in ("yahoo", "auto"):
+                try:
+                    rows = list(ddgs.text(q, region="br-pt", max_results=8, backend=backend_name))
+                    if rows:
+                        for r in rows:
+                            title = cls._clean_text(r.get("title", ""))
+                            body = cls._clean_text(r.get("body", ""))
+                            href = r.get("href", "")
+                            if title and href.startswith("http"):
+                                out.append({"title": title, "snippet": body, "url": href})
+                        break
+                except Exception:
+                    continue
         return out
 
     @classmethod
