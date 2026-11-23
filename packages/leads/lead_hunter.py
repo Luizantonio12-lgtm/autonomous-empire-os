@@ -225,6 +225,12 @@ class RealLeadHunter:
             v_all = (await db.execute(select(BusinessVenture))).scalars().all()
             low_n = niche_clean.lower()
             for v in v_all:
+                if ("ofic" in low_n or "mecân" in low_n or "mecan" in low_n or "auto" in low_n) and "OficinaZap" in v.name:
+                    venture = v
+                    break
+                if ("pet" in low_n or "banho" in low_n or "tosa" in low_n or "vet" in low_n) and "PetAgenda" in v.name:
+                    venture = v
+                    break
                 if ("pizz" in low_n or "hamb" in low_n or "lanch" in low_n) and "ZapPedido" in v.name:
                     venture = v
                     break

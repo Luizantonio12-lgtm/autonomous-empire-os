@@ -184,6 +184,24 @@ async def seed_initial_empire_state() -> None:
             initial_customers=0,
         )
 
+        await AutonomousVentureBuilder.launch_full_venture(
+            db=db,
+            name="OficinaZap AI",
+            niche="Oficinas Mecânicas, Auto Centers & Troca de Óleo",
+            tagline="Orçamento Rápido no WhatsApp, Aviso Automático de Carro Pronto e Lembrete de Troca de Óleo",
+            monthly_price_usd=26.02,
+            initial_customers=0,
+        )
+
+        await AutonomousVentureBuilder.launch_full_venture(
+            db=db,
+            name="PetAgenda AI",
+            niche="Pet Shops, Banho e Tosa & Clínicas Veterinárias",
+            tagline="Agendamento Automático de Banho e Tosa no WhatsApp, Aviso de Pet Pronto e Cobrança Pix",
+            monthly_price_usd=17.17,
+            initial_customers=0,
+        )
+
         await MetaCreatorAgent.propose_specialized_agent(
             db=db,
             task_id=None,
