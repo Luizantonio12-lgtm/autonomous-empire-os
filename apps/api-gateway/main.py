@@ -1,9 +1,12 @@
 import asyncio
+import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -133,7 +136,7 @@ class CreateInvoiceRequest(BaseModel):
 
 
 class PairWhatsAppRequest(BaseModel):
-    phone_number: str = "+55 16 99810-2026"
+    phone_number: str = "5516993862008"
 
 
 class StoreMemoryRequest(BaseModel):

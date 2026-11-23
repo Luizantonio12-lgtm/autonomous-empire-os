@@ -151,13 +151,11 @@ export default function App() {
     'Criar Agente Jurídico & Contratos SaaS Internacionais para revisão autónoma de cláusulas B2B'
   );
 
-  // WhatsApp Evolution API QR + Webhook
-  const [pairPhone, setPairPhone] = useState('+55 16 99810-2026');
-  const [waName, setWaName] = useState('Mariana Costa (Diretora Operações)');
-  const [waPhone, setWaPhone] = useState('+5511997410022');
-  const [waMessage, setWaMessage] = useState(
-    'Olá! Estamos com um pico de acessos e preciso validar se a nossa chave API e fatura Pix estão liberadas.'
-  );
+  // WhatsApp Oficial (Seu Número Padrão)
+  const [pairPhone, setPairPhone] = useState('16 99386-2008');
+  const [waName, setWaName] = useState('Cliente Comercial');
+  const [waPhone, setWaPhone] = useState('');
+  const [waMessage, setWaMessage] = useState('');
 
   // Pagamentos Stripe / Asaas Pix
   const [invProvider, setInvProvider] = useState<'ASAAS_PIX' | 'STRIPE'>('ASAAS_PIX');
@@ -183,16 +181,54 @@ export default function App() {
   const [huntVentureId, setHuntVentureId] = useState('');
   const [huntedLeads, setHuntedLeads] = useState<RealLeadItem[]>([]);
   const [huntingLoading, setHuntingLoading] = useState(false);
-  const [myWaPhone, setMyWaPhone] = useState('');
+  const [myWaPhone, setMyWaPhone] = useState('16 99386-2008');
   const [pairCodeLoading, setPairCodeLoading] = useState(false);
+  const [copiedWaCode, setCopiedWaCode] = useState(false);
   const [autoOutreachMsg, setAutoOutreachMsg] = useState<string | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
 
+  const copyWhatsAppCode = async (rawCode?: string | null) => {
+    const clean = String(rawCode || '')
+      .replace(/[^A-Za-z0-9]/g, '')
+      .toUpperCase();
+    if (!clean) return;
+    let ok = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(clean);
+        ok = true;
+      }
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = clean;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '0';
+        ta.style.left = '0';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, clean.length);
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch {
+        // ignore
+      }
+    }
+    setCopiedWaCode(true);
+    setTimeout(() => setCopiedWaCode(false), 4000);
+  };
+
   const requestMyWaPairingCode = async () => {
     const clean = myWaPhone.replace(/\D/g, '');
-    if (clean.length < 10) {
-      alert('Digita o teu DDD + Número do WhatsApp (ex: 17999998888)');
+    if (clean.length < 10 || clean.length > 13) {
+      alert('Confira o número: informe apenas DDD + Número (ex: 16 99386-2008).');
       return;
     }
     setPairCodeLoading(true);
@@ -708,13 +744,22 @@ export default function App() {
   };
 
   const confirmWhatsAppPair = async () => {
+    const clean = pairPhone.replace(/\D/g, '');
+    if (clean.length < 10 || clean.length > 13) {
+      alert('Confira o número: informe apenas DDD + Número (ex: 16 99386-2008).');
+      return;
+    }
     setBusy(true);
     try {
-      await fetch('/api/whatsapp/pair', {
+      const res = await fetch('/api/whatsapp/pair-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone_number: pairPhone }),
+        body: JSON.stringify({ phone_number: clean }),
       });
+      const json = await res.json();
+      if (!res.ok) {
+        alert(json.detail || 'Erro ao solicitar código no WhatsApp.');
+      }
       await fetchOverview();
     } finally {
       setBusy(false);
@@ -1356,20 +1401,28 @@ export default function App() {
                   </div>
 
                   {waState?.pairing_code && waState.status === 'PAIRING_CODE_READY' && (
-                    <div className="bg-emerald-950/50 border border-emerald-500/50 rounded-xl p-4 text-center space-y-2">
+                    <div className="bg-emerald-950/50 border border-emerald-500/50 rounded-xl p-4 text-center space-y-3">
                       <p className="text-xs text-emerald-200 font-semibold">
-                        TEU CÓDIGO OFICIAL DO WHATSAPP ( Toca para copiar ):
+                        SEU CÓDIGO LIMPO DE 8 LETRAS (PRONTO PARA COLAR NO WHATSAPP):
                       </p>
-                      <button
-                        onClick={() => navigator.clipboard.writeText(waState.pairing_code.replace('-', ''))}
-                        className="text-2xl sm:text-3xl font-mono font-extrabold tracking-widest text-white bg-slate-900 px-6 py-2.5 rounded-xl border border-emerald-400 cursor-pointer"
-                      >
-                        {waState.pairing_code}
-                      </button>
+                      <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5">
+                        <input
+                          readOnly
+                          value={waState.pairing_code.replace(/[^A-Za-z0-9]/g, '').toUpperCase()}
+                          onClick={(e) => e.currentTarget.select()}
+                          className="w-52 text-center text-2xl sm:text-3xl font-mono font-extrabold tracking-widest text-white bg-slate-900 px-4 py-2.5 rounded-xl border border-emerald-400 select-all"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => copyWhatsAppCode(waState.pairing_code)}
+                          className="px-5 py-3 rounded-xl bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-extrabold text-sm cursor-pointer shadow-lg"
+                        >
+                          {copiedWaCode ? '✅ COPIADO! COLE NO WHATSAPP' : '📋 COPIAR CÓDIGO'}
+                        </button>
+                      </div>
                       <p className="text-xs text-slate-300">
-                        Agora abre o teu <strong>WhatsApp</strong> → <strong>3 pontinhos (⋮)</strong> →{' '}
-                        <strong>Aparelhos conectados</strong> → <strong>Conectar um aparelho</strong> → lá embaixo toca em{' '}
-                        <strong>&quot;Conectar com número de telefone&quot;</strong> e digita o código acima!
+                        Abra o <strong>WhatsApp</strong> → <strong>Aparelhos conectados</strong> →{' '}
+                        <strong>Conectar um aparelho</strong> → <strong>Conectar com número de telefone</strong>, segure o dedo no 1º quadradinho e toque em <strong>Colar</strong>!
                       </p>
                     </div>
                   )}
@@ -2774,19 +2827,28 @@ export default function App() {
                         {waState?.instance_name ?? 'empire-hq'}
                       </strong>
                     </div>
-                    <div>
-                      <span className="text-slate-400">Pairing Code:</span>{' '}
-                      <strong
-                        onClick={() =>
-                          waState?.pairing_code &&
-                          navigator.clipboard.writeText(waState.pairing_code.replace('-', ''))
-                        }
-                        title="Toque para copiar os 8 dígitos sem traço"
-                        className="font-mono text-emerald-400 cursor-pointer underline decoration-dotted"
-                      >
-                        {waState?.pairing_code}
-                      </strong>
-                    </div>
+                    {waState?.pairing_code && waState.status !== 'CONNECTED' && (
+                      <div className="space-y-1.5 bg-emerald-950/40 border border-emerald-500/40 rounded-lg p-2.5">
+                        <div className="text-[11px] text-emerald-200 font-semibold">
+                          Código Limpo (8 Letras — Sem Traço):
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            readOnly
+                            value={waState.pairing_code.replace(/[^A-Za-z0-9]/g, '').toUpperCase()}
+                            onClick={(e) => e.currentTarget.select()}
+                            className="w-36 text-center font-mono text-base font-extrabold tracking-widest text-white bg-slate-950 border border-emerald-400 rounded-lg py-1 select-all"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => copyWhatsAppCode(waState.pairing_code)}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-extrabold text-xs cursor-pointer"
+                          >
+                            {copiedWaCode ? '✅ Copiado!' : '📋 Copiar'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     {waState?.paired_number && (
                       <div>
                         <span className="text-slate-400">Número Conectado:</span>{' '}

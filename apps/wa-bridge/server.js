@@ -206,8 +206,9 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
           try {
             lastBridgeEvent = `requesting_companion_hello:${pairingPhone}`;
             const rawCode = await activeSock.requestPairingCode(pairingPhone);
-            currentPairingCode =
-              rawCode && rawCode.length === 8 ? `${rawCode.slice(0, 4)}-${rawCode.slice(4)}` : rawCode;
+            currentPairingCode = String(rawCode || '')
+              .replace(/[^A-Za-z0-9]/g, '')
+              .toUpperCase();
             connectionStatus = 'PAIRING_CODE_READY';
             lastBridgeEvent = `companion_hello_accepted:${pairingPhone}`;
           } catch (err) {
@@ -355,6 +356,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/connect-qr') {
+    if (connectionStatus === 'CONNECTED') {
+      return res.end(
+        JSON.stringify({
+          ok: true,
+          status: 'CONNECTED',
+          phone: connectedPhone,
+          already_connected: true,
+          last_event: lastBridgeEvent,
+        })
+      );
+    }
     await startSocket({ resetAuth: connectionStatus === 'DISCONNECTED' });
     for (let i = 0; i < 16; i++) {
       if (currentQrSvg || connectionStatus === 'CONNECTED') break;
@@ -374,10 +386,27 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && req.url === '/pair-code') {
     const body = await readJson(req);
+    if (connectionStatus === 'CONNECTED' && !body.force) {
+      return res.end(
+        JSON.stringify({
+          ok: true,
+          status: 'CONNECTED',
+          phone: connectedPhone,
+          pairing_code: '',
+          already_connected: true,
+          last_event: lastBridgeEvent,
+        })
+      );
+    }
     const digits = cleanDigits(body.phone);
-    if (digits.length < 12) {
+    if (digits.length < 12 || digits.length > 13) {
       res.statusCode = 400;
-      return res.end(JSON.stringify({ ok: false, error: 'Informe DDD + Número (ex: 5516993862008)' }));
+      return res.end(
+        JSON.stringify({
+          ok: false,
+          error: 'Número inválido. Informe DDD + Número com 10 ou 11 dígitos (ex: 16 99386-2008).',
+        })
+      );
     }
     await startSocket({ resetAuth: true, pairingPhone: digits });
     for (let i = 0; i < 35; i++) {
