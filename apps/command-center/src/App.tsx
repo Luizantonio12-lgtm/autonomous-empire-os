@@ -248,6 +248,21 @@ export default function App() {
     }
   };
 
+  const toggleOutreachAutopilot = async () => {
+    const nextEnabled = !(data?.outreach_autopilot?.autopilot_enabled ?? true);
+    setBusy(true);
+    try {
+      await fetch('/api/leads/autopilot-toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: nextEnabled }),
+      });
+      await fetchOverview();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const launchAutonomousOutreach = async () => {
     setHuntingLoading(true);
     setAutoOutreachMsg(null);
@@ -1428,20 +1443,81 @@ export default function App() {
                   )}
                 </div>
               ) : (
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    onClick={launchAutonomousOutreach}
-                    disabled={huntingLoading}
-                    className="px-5 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-extrabold text-sm flex items-center gap-2 shadow-lg shadow-emerald-500/25 cursor-pointer transition"
-                  >
-                    <Rocket className="w-4 h-4" />
-                    {huntingLoading
-                      ? 'Iniciando Disparo Automático...'
-                      : `🤖 Mandar Agentes Abordarem ${huntNiche} em ${huntCity} Sozinhos!`}
-                  </button>
-                  <span className="text-xs text-slate-400">
-                    Intervalo seguro anti-banimento (25s por loja) + Resposta & Pix Asaas 100% automáticos!
-                  </span>
+                <div className="space-y-3">
+                  <div className="bg-slate-950/90 border border-emerald-500/40 rounded-xl p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`w-2.5 h-2.5 rounded-full ${
+                            (data?.outreach_autopilot?.autopilot_enabled ?? true)
+                              ? 'bg-emerald-400 animate-pulse'
+                              : 'bg-amber-400'
+                          }`}
+                        />
+                        <span className="text-sm font-extrabold text-white">
+                          {(data?.outreach_autopilot?.autopilot_enabled ?? true)
+                            ? '🟢 PILOTO 100% AUTOMÁTICO (SEM PRECISAR CLICAR): LIGADO 24/7'
+                            : '⏸️ PILOTO AUTOMÁTICO EM PAUSA'}
+                        </span>
+                      </div>
+                      <button
+                        onClick={toggleOutreachAutopilot}
+                        disabled={busy}
+                        className={`px-3.5 py-1.5 rounded-lg font-bold text-xs cursor-pointer transition ${
+                          (data?.outreach_autopilot?.autopilot_enabled ?? true)
+                            ? 'bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-300'
+                            : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                        }`}
+                      >
+                        {(data?.outreach_autopilot?.autopilot_enabled ?? true)
+                          ? '⏸️ Pausar Automático'
+                          : '▶️ Ligar Automático 24/7'}
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                      <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5">
+                        <div className="text-slate-400">Rodando Agora Sozinho:</div>
+                        <div className="font-bold text-emerald-300 mt-0.5">
+                          {data?.outreach_autopilot?.target_query || 'Iniciando giro automático...'}
+                        </div>
+                      </div>
+                      <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5">
+                        <div className="text-slate-400">Próxima Cidade Automática:</div>
+                        <div className="font-bold text-cyan-300 mt-0.5">
+                          {data?.outreach_autopilot?.next_target || 'Barretos SP'}
+                          {data?.outreach_autopilot?.next_cycle_in_sec
+                            ? ` (${Math.max(1, Math.ceil(data.outreach_autopilot.next_cycle_in_sec / 60))} min)`
+                            : ''}
+                        </div>
+                      </div>
+                      <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5">
+                        <div className="text-slate-400">Abordados Hoje (Anti-Ban):</div>
+                        <div className="font-bold text-white mt-0.5">
+                          {data?.outreach_autopilot?.sent_today ?? 0} / {data?.outreach_autopilot?.daily_limit ?? 50} lojas
+                          {data?.outreach_autopilot?.last_contacted
+                            ? ` • Última: ${data.outreach_autopilot.last_contacted}`
+                            : ''}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={launchAutonomousOutreach}
+                      disabled={huntingLoading}
+                      className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-emerald-500/30 disabled:opacity-50 text-emerald-300 font-bold text-xs flex items-center gap-2 cursor-pointer transition"
+                    >
+                      <Rocket className="w-3.5 h-3.5" />
+                      {huntingLoading
+                        ? 'Iniciando...'
+                        : `Disparar Agora Manualmente: ${huntNiche} em ${huntCity} (Opcional)`}
+                    </button>
+                    <span className="text-xs text-slate-400">
+                      Os agentes já giram sozinhos por +20 cidades, respondem dúvidas e oferecem Pix (ou promo R$ 49,90)!
+                    </span>
+                  </div>
                 </div>
               )}
 

@@ -204,12 +204,30 @@ export interface BusinessVentureItem {
 
 export interface WhatsAppInstanceState {
   instance_name: string;
-  status: 'DISCONNECTED' | 'QR_READY' | 'CONNECTED';
+  status: 'DISCONNECTED' | 'QR_READY' | 'PAIRING_CODE_READY' | 'CONNECTING' | 'CONNECTED';
   paired_number: string | null;
   pairing_code: string;
   qr_base64: string | null;
   qr_svg: string | null;
   mode: string;
+  sent_count?: number;
+  last_event?: string;
+  last_error?: string;
+}
+
+export interface OutreachAutopilotState {
+  autopilot_enabled: boolean;
+  running: boolean;
+  target_query: string;
+  next_target: string;
+  queued: number;
+  sent: number;
+  skipped_no_wa: number;
+  last_contacted: string;
+  sent_today: number;
+  daily_limit: number;
+  total_sent_session: number;
+  next_cycle_in_sec: number;
 }
 
 export interface VaultKeyStatus {
@@ -251,6 +269,7 @@ export interface DashboardOverview {
   security: SecurityOverview;
   security_logs: SecurityLogItem[];
   whatsapp_instance: WhatsAppInstanceState;
+  outreach_autopilot?: OutreachAutopilotState;
   vault_status: VaultKeyStatus[];
   telemetry: TelemetryEvent[];
 }

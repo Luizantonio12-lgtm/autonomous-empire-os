@@ -73,8 +73,9 @@ class RealLeadHunter:
         out: list[dict] = []
         ddgs = DDGS(timeout=5)
         for q in (
+            f'{niche} "{city}" whatsapp 9',
             f"{niche} {city} telefone whatsapp",
-            f"{niche} {city} instagram",
+            f"{niche} {city} instagram wa.me",
         ):
             # NUNCA usar 'auto' nem 'bing' (que devolvem spam em IPs cloud)
             for backend_name in ("yahoo", "duckduckgo"):
@@ -273,12 +274,21 @@ class RealLeadHunter:
                 continue
             seen_keys.add(t_key)
             unique_raw.append(it)
-            if len(unique_raw) >= 12:
-                break
+
+        # Prioriza estabelecimentos que já possuem celular WhatsApp (13 dígitos c/ 9) ou telefone extraível!
+        def _phone_rank(it: dict) -> int:
+            ph = cls._extract_phone(f"{it.get('title', '')} {it.get('snippet', '')} {it.get('url', '')}")
+            if len(ph) == 13 and ph[4] == "9":
+                return 0
+            if ph:
+                return 1
+            return 2
+
+        unique_raw.sort(key=_phone_rank)
 
         leads: list[dict] = []
         for idx, item in enumerate(unique_raw[:10]):
-            combined_txt = f"{item['title']} {item['snippet']}"
+            combined_txt = f"{item['title']} {item['snippet']} {item.get('url', '')}"
             phone_digits = cls._extract_phone(combined_txt)
             ig_match = IG_HANDLE_RE.search(combined_txt)
             if not ig_match and "instagram.com/" in item["url"]:

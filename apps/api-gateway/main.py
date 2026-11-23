@@ -65,7 +65,9 @@ async def lifespan(app: FastAPI):
     await event_bus.connect_redis_if_available()
     await run_seed()
     AutonomousSchedulerDaemon.start_background_worker()
+    AutonomousOutreachEngine.start_autopilot_daemon()
     yield
+    await AutonomousOutreachEngine.stop_autopilot_daemon()
     await AutonomousSchedulerDaemon.stop_background_worker()
 
 
@@ -477,6 +479,7 @@ async def get_dashboard_overview(db: AsyncSession = Depends(get_db)):
         "invoices": invoices,
         "memories": memories,
         "scheduler": AutonomousSchedulerDaemon.get_state(),
+        "outreach_autopilot": AutonomousOutreachEngine.get_campaign_status(),
         "scheduled_jobs": scheduled_jobs,
         "growth_campaigns": growth_campaigns,
         "security": SovereignSecurityGuard.get_security_overview(),
@@ -1000,6 +1003,12 @@ async def send_single_lead_autonomous(
 @app.get("/api/leads/campaign-status")
 async def get_auto_campaign_status():
     return {"ok": True, "stats": AutonomousOutreachEngine.get_campaign_status()}
+
+
+@app.post("/api/leads/autopilot-toggle")
+async def toggle_outreach_autopilot(payload: AutopilotToggleRequest):
+    stats = AutonomousOutreachEngine.set_autopilot(payload.enabled)
+    return {"ok": True, "stats": stats}
 
 
 @app.post("/api/webhooks/wa-bridge-inbound")
