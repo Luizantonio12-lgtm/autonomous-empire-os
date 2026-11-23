@@ -1116,6 +1116,24 @@ if FRONTEND_DIST.exists():
     async def serve_pwa_icon_512():
         return FileResponse(str(FRONTEND_DIST / "icon-512.png"), media_type="image/png")
 
+    @app.get("/.well-known/assetlinks.json")
+    async def serve_android_assetlinks():
+        al_path = FRONTEND_DIST / ".well-known" / "assetlinks.json"
+        if al_path.exists():
+            return FileResponse(str(al_path), media_type="application/json")
+        return [
+            {
+                "relation": ["delegate_permission/common.handle_all_urls"],
+                "target": {
+                    "namespace": "android_app",
+                    "package_name": "com.autonomousempire.os",
+                    "sha256_cert_fingerprints": [
+                        "61:0C:6A:7E:94:72:7E:4B:26:B3:EA:EB:C8:CD:43:22:A4:83:35:2A:A2:46:32:81:6C:1E:AF:0E:21:7D:E6:07"
+                    ],
+                },
+            }
+        ]
+
     @app.get("/")
     async def serve_spa_root():
         return FileResponse(str(FRONTEND_DIST / "index.html"))

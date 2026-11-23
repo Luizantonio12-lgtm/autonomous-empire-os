@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.autonomousempire.os",
+        "sha256_cert_fingerprints": ["61:0C:6A:7E:94:72:7E:4B:26:B3:EA:EB:C8:CD:43:22:A4:83:35:2A:A2:46:32:81:6C:1E:AF:0E:21:7D:E6:07"]
+      }
+    }]
