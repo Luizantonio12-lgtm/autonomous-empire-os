@@ -1,0 +1,2884 @@
+diff --git a/Dockerfile b/Dockerfile
+index 274b11c..a17b9b7 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -31,4 +31,4 @@ COPY --from=wa-bridge-builder /wa /app/apps/wa-bridge
+ 
+ RUN mkdir -p /app/deployments /app/.wa_auth
+ EXPOSE 10000
+-CMD ["sh", "-c", "PORT=${PORT:-10000} WA_BRIDGE_PORT=3005 WA_AUTH_DIR=/app/.wa_auth node /app/apps/wa-bridge/server.js & uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --app-dir /app/apps/api-gateway"]
++CMD ["sh", "-c", "WA_INTERNAL_SECRET=$(python -c 'import secrets; print(secrets.token_hex(32))'); export WA_INTERNAL_SECRET; PORT=${PORT:-10000} WA_BRIDGE_PORT=3005 WA_AUTH_DIR=/app/.wa_auth node /app/apps/wa-bridge/server.js & exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --app-dir /app/apps/api-gateway"]
+diff --git a/apps/api-gateway/main.py b/apps/api-gateway/main.py
+index 95a67fc..2636b4e 100644
+--- a/apps/api-gateway/main.py
++++ b/apps/api-gateway/main.py
+@@ -1,4 +1,6 @@
+ import asyncio
++import time
++from collections import deque
+ import json
+ import os
+ import sys
+@@ -13,7 +15,7 @@ import httpx
+ 
+ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+ from fastapi.middleware.cors import CORSMiddleware
+-from fastapi.responses import FileResponse
++from fastapi.responses import FileResponse, JSONResponse, Response
+ from fastapi.staticfiles import StaticFiles
+ from pydantic import BaseModel, Field
+ from sqlalchemy import delete, desc, select
+@@ -56,9 +58,11 @@ from packages.llm_router import ConfigVault  # noqa: E402
+ from packages.memory import EmpireSemanticMemory  # noqa: E402
+ from packages.orchestrator import execute_empire_directive  # noqa: E402
+ from packages.payments import PaymentGatewayManager  # noqa: E402
++from packages.payments.gateways import PaymentGatewayUnavailable  # noqa: E402
+ from packages.sandbox_runner import DEPLOYMENTS_ROOT  # noqa: E402
+ from packages.scheduler import AutonomousSchedulerDaemon  # noqa: E402
+ from packages.security import SovereignSecurityGuard  # noqa: E402
++from packages.security.session_controls import COOKIE_NAME, same_origin, secure_credentials_configured, valid_internal_secret, valid_session  # noqa: E402
+ from packages.ventures import AutonomousVentureBuilder  # noqa: E402
+ 
+ 
+@@ -86,8 +90,38 @@ app = FastAPI(
+     title="Autonomous Business Empire v3.0 — API Gateway",
+     version="3.0.0",
+     lifespan=lifespan,
++    docs_url=None,
++    redoc_url=None,
++    openapi_url=None,
+ )
+ 
++@app.middleware("http")
++async def restrict_sensitive_api(request: Request, call_next):
++    path = request.url.path
++    if not path.startswith("/api/"):
++        return await call_next(request)
++    if path in ("/api/health", "/api/security/login", "/api/webhooks/asaas"):
++        if path == "/api/security/login" and request.method != "GET":
++            if not same_origin(request.headers.get("origin"), request.headers.get("host")):
++                return JSONResponse(status_code=403, content={"detail": "Origem não autorizada."})
++        return await call_next(request)
++    if path in ("/api/internal/wa-auth-backup", "/api/internal/wa-auth-restore", "/api/internal/wa-delivery-status", "/api/webhooks/wa-bridge-inbound"):
++        if not valid_internal_secret(request.headers.get("x-wa-internal-secret")):
++            return JSONResponse(status_code=403, content={"detail": "Acesso interno negado."})
++        return await call_next(request)
++    if not valid_session(request.cookies.get(COOKIE_NAME)):
++        return JSONResponse(status_code=401, content={"detail": "Autenticação necessária."})
++    if request.method not in ("GET", "HEAD", "OPTIONS"):
++        if not same_origin(request.headers.get("origin"), request.headers.get("host")):
++            return JSONResponse(status_code=403, content={"detail": "Origem não autorizada."})
++    return await call_next(request)
++
++
++@app.exception_handler(PaymentGatewayUnavailable)
++async def payment_unavailable_handler(request: Request, exc: PaymentGatewayUnavailable):
++    return JSONResponse(status_code=503, content={"ok": False, "detail": "Pagamento indisponível. Tente novamente mais tarde."})
++
++
+ app.add_middleware(
+     CORSMiddleware,
+     allow_origins=["*"],
+@@ -733,13 +767,27 @@ async def launch_growth_campaign_endpoint(
+ # ============================================================================
+ # SEGURANÇA SOBERANA CEO (JWT HS256 + TOTP 2FA RFC 6238 + GLOBAL KILL-SWITCH)
+ # ============================================================================
++# Limite global por processo: mitigação complementar, não substitui WAF ou
++# rate limiting distribuído em ambientes com várias instâncias.
++_LOGIN_ATTEMPTS: deque[float] = deque()
++
++
+ @app.post("/api/security/login")
+ async def ceo_sovereign_login(
+     payload: SecurityLoginRequest,
+     request: Request,
++    response: Response,
+     db: AsyncSession = Depends(get_db),
+ ):
+-    ip_hint = request.client.host if request.client else "127.0.0.1"
++    if not secure_credentials_configured():
++        raise HTTPException(status_code=503, detail="Credenciais seguras ainda não configuradas.")
++    now = time.monotonic()
++    while _LOGIN_ATTEMPTS and _LOGIN_ATTEMPTS[0] <= now - 60:
++        _LOGIN_ATTEMPTS.popleft()
++    if len(_LOGIN_ATTEMPTS) >= 10:
++        raise HTTPException(status_code=429, detail="Muitas tentativas. Aguarde um minuto.")
++    _LOGIN_ATTEMPTS.append(now)
++    ip_hint = request.client.host if request.client else "unknown"
+     try:
+         auth = await SovereignSecurityGuard.authenticate_ceo(
+             db=db,
+@@ -747,9 +795,16 @@ async def ceo_sovereign_login(
+             totp_code=payload.totp_code,
+             ip_hint=ip_hint,
+         )
+-        return {"ok": True, **auth}
+-    except ValueError as exc:
+-        raise HTTPException(status_code=401, detail=str(exc))
++        response.set_cookie(COOKIE_NAME, auth["token"], httponly=True, secure=True, samesite="strict", max_age=14400, path="/")
++        return {"ok": True, "role": auth["role"]}
++    except ValueError:
++        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
++
++
++@app.post("/api/security/logout")
++async def ceo_logout(response: Response):
++    response.delete_cookie(COOKIE_NAME, path="/", secure=True, httponly=True, samesite="strict")
++    return {"ok": True}
+ 
+ 
+ @app.post("/api/security/kill-switch")
+@@ -869,11 +924,9 @@ async def settle_payment_webhook(
+     invoice_id: str,
+     db: AsyncSession = Depends(get_db),
+ ):
+-    try:
+-        inv = await PaymentGatewayManager.reconcile_paid_webhook(db, invoice_id)
+-        return {"ok": True, "invoice_id": inv.id, "status": inv.status}
+-    except ValueError as exc:
+-        raise HTTPException(status_code=404, detail=str(exc))
++    # Uma solicitação com ID de fatura não é prova de pagamento.
++    # Desabilitado até existir conciliação autenticada com o provedor.
++    raise HTTPException(status_code=403, detail="Liquidação manual desabilitada.")
+ 
+ 
+ @app.post("/api/webhooks/asaas")
+@@ -881,12 +934,75 @@ async def asaas_production_webhook(
+     request: Request,
+     db: AsyncSession = Depends(get_db),
+ ):
++    from packages.payments.asaas_sandbox_inbox import record_event, sandbox_enabled
++    from packages.payments.asaas_validation import valid_webhook_token
++
++    if not sandbox_enabled():
++        raise HTTPException(status_code=503, detail="Conciliação Asaas indisponível fora do sandbox de testes.")
++    token = os.getenv("ASAAS_WEBHOOK_TOKEN", "")
++    if not (32 <= len(token) <= 255) or any(c.isspace() for c in token):
++        raise HTTPException(status_code=503, detail="Token sandbox não configurado.")
++    if not valid_webhook_token(token, request.headers.get("asaas-access-token", "")):
++        raise HTTPException(status_code=401, detail="Token inválido.")
++    api_key = await ConfigVault.get_secret(db, "ASAAS_API_KEY")
++    if token == api_key:
++        raise HTTPException(status_code=503, detail="Token do webhook deve ser diferente da chave de API.")
++    chunks, size = [], 0
++    async for chunk in request.stream():
++        size += len(chunk)
++        if size > 65536:
++            raise HTTPException(status_code=413, detail="Evento muito grande.")
++        chunks.append(chunk)
+     try:
+-        body = await request.json()
+-    except Exception:
+-        body = {}
+-    result = await PaymentGatewayManager.handle_asaas_webhook(db, body)
+-    return {"ok": True, **result}
++        body = json.loads(b"".join(chunks))
++        created = await record_event(db, body)
++    except (ValueError, UnicodeDecodeError):
++        raise HTTPException(status_code=400, detail="Evento inválido ou conflito de identificação.")
++    # Durável, mas NÃO liquidado: ainda exige verificação e revisão manual.
++    return {"ok": True, "recorded": created, "settled": False}
++
++
++@app.get("/api/payments/asaas-inbox")
++async def list_asaas_sandbox_events(
++    offset: int = Query(default=0, ge=0, le=100000),
++    limit: int = Query(default=25, ge=1, le=100),
++    db: AsyncSession = Depends(get_db),
++):
++    from packages.database.models import AsaasWebhookInbox
++    from packages.payments.asaas_sandbox_inbox import sandbox_enabled
++    if not sandbox_enabled():
++        raise HTTPException(status_code=503, detail="Caixa do Sandbox Asaas não está habilitada.")
++    rows = (await db.execute(select(AsaasWebhookInbox)
++        .order_by(desc(AsaasWebhookInbox.created_at), desc(AsaasWebhookInbox.event_id))
++        .offset(offset).limit(limit + 1))).scalars().all()
++    return {
++        'ok': True,
++        'sandbox_only': True,
++        'items': [{
++            'event_id': row.event_id,
++            'event_type': row.event_type,
++            'payment_id': row.payment_id,
++            'status': row.status,
++            'reason': row.verification_reason,
++            'invoice_id': row.invoice_id,
++            'created_at': row.created_at.isoformat() if row.created_at else '',
++            'verified_at': row.verified_at.isoformat() if row.verified_at else None,
++        } for row in rows[:limit]],
++        'next_offset': offset + limit if len(rows) > limit else None,
++    }
++
++
++@app.post("/api/payments/asaas-inbox/{event_id}/verify")
++async def verify_asaas_sandbox_event(event_id: str, db: AsyncSession = Depends(get_db)):
++    from packages.payments.asaas_sandbox_inbox import verify_received_event
++    try:
++        return {"ok": True, **await verify_received_event(db, event_id)}
++    except LookupError:
++        raise HTTPException(status_code=404, detail="Evento não encontrado.")
++    except ValueError:
++        raise HTTPException(status_code=400, detail="Evento inválido.")
++    except RuntimeError:
++        raise HTTPException(status_code=503, detail="Verificação sandbox indisponível.")
+ 
+ 
+ @app.post("/api/whatsapp/qr/refresh")
+@@ -1073,15 +1189,25 @@ class SingleAutoSendRequest(BaseModel):
+ 
+ class WaBridgeInboundRequest(BaseModel):
+     remote_jid: str = ""
++    phone_jid: str = ""
++    message_id: str = ""
+     phone: str
+     contact_name: str = "Cliente WhatsApp"
+     message: str
++    has_audio: bool = False
++    has_image: bool = False
+     audio_base64: str = ""
+     audio_mime: str = "audio/ogg"
+     image_base64: str = ""
+     image_mime: str = "image/jpeg"
+ 
+ 
++class WaDeliveryStatusRequest(BaseModel):
++    phone_jid: str = Field(..., max_length=128)
++    message_id: str = Field(..., max_length=128)
++    result: str = Field(..., pattern=r'^(SUBMITTED|UNCERTAIN)$')
++
++
+ class VipSetupCheckoutRequest(BaseModel):
+     business_name: str
+     whatsapp_phone: str
+@@ -1180,17 +1306,79 @@ async def handle_wa_bridge_inbound(
+     payload: WaBridgeInboundRequest,
+     db: AsyncSession = Depends(get_db),
+ ):
+-    reply = await AutonomousOutreachEngine.handle_real_whatsapp_reply(
++    from packages.leads.conversation_policy import handle_inbound
++
++    result = await handle_inbound(
+         db=db,
+-        phone=payload.phone,
+-        contact_name=payload.contact_name,
++        message_id=payload.message_id,
++        phone_jid=payload.phone_jid or payload.remote_jid,
++        name=payload.contact_name,
+         message=payload.message,
+-        audio_base64=payload.audio_base64,
+-        audio_mime=payload.audio_mime,
+-        image_base64=payload.image_base64,
+-        image_mime=payload.image_mime,
++        audio=payload.has_audio or bool(payload.audio_base64) or payload.message.startswith('[ÁUDIO_WHATSAPP]') or payload.message.startswith('[Áudio recebido'),
++        image=payload.has_image or bool(payload.image_base64) or payload.message == '[FOTO_WHATSAPP]',
++        handoff=payload.message.startswith('[CEO_HANDOFF_TRIGGER]'),
+     )
+-    return {"ok": True, "auto_reply": reply}
++    return {"ok": True, "auto_reply": result['reply'], "reason": result['reason']}
++
++
++@app.post("/api/internal/wa-delivery-status")
++async def wa_delivery_status(payload: WaDeliveryStatusRequest, db: AsyncSession = Depends(get_db)):
++    from datetime import datetime, timezone
++    from sqlalchemy import update
++    from packages.database.models import WhatsAppReplyDelivery
++    from packages.leads.conversation_policy import message_hash_for
++
++    key = message_hash_for(payload.phone_jid, payload.message_id)
++    if not key:
++        raise HTTPException(status_code=400, detail="Identificador inválido.")
++    result = await db.execute(update(WhatsAppReplyDelivery).where(
++        WhatsAppReplyDelivery.message_hash == key,
++        WhatsAppReplyDelivery.status == 'PREPARED',
++    ).values(status=payload.result, updated_at=datetime.now(timezone.utc)))
++    await db.commit()
++    return {"ok": True, "updated": result.rowcount == 1}
++
++
++@app.get("/api/conversations")
++async def list_conversations(
++    pending_only: bool = False,
++    offset: int = Query(default=0, ge=0, le=100000),
++    limit: int = Query(default=30, ge=1, le=100),
++    db: AsyncSession = Depends(get_db),
++):
++    from packages.database.models import WhatsAppReplyDelivery
++    query = (select(OmnichannelInteraction, WhatsAppReplyDelivery.status)
++        .outerjoin(WhatsAppReplyDelivery, WhatsAppReplyDelivery.interaction_id == OmnichannelInteraction.id)
++        .where(OmnichannelInteraction.channel == 'WHATSAPP_REAL_AUTO'))
++    if pending_only:
++        query = query.where(OmnichannelInteraction.deal_stage == 'WAIT_HUMAN_REVIEW')
++    rows = (await db.execute(query.order_by(desc(OmnichannelInteraction.created_at), desc(OmnichannelInteraction.id))
++                             .offset(offset).limit(limit + 1))).all()
++    items = [{
++        'id': interaction.id,
++        'contact_name': interaction.contact_name,
++        'contact_handle': interaction.contact_handle,
++        'inbound_message': interaction.inbound_message,
++        'agent_response': interaction.agent_response,
++        'deal_stage': interaction.deal_stage,
++        'delivery_status': status or ('NO_AUTO_REPLY' if interaction.deal_stage in ('WAIT_HUMAN_REVIEW', 'REVIEWED_HUMAN') else 'LEGACY_UNKNOWN'),
++        'created_at': interaction.created_at.isoformat() if interaction.created_at else '',
++    } for interaction, status in rows[:limit]]
++    return {'ok': True, 'items': items, 'next_offset': offset + limit if len(rows) > limit else None}
++
++
++@app.post("/api/conversations/{interaction_id}/reviewed")
++async def mark_conversation_reviewed(interaction_id: str, db: AsyncSession = Depends(get_db)):
++    from sqlalchemy import update
++    result = await db.execute(update(OmnichannelInteraction).where(
++        OmnichannelInteraction.id == interaction_id,
++        OmnichannelInteraction.channel == 'WHATSAPP_REAL_AUTO',
++        OmnichannelInteraction.deal_stage == 'WAIT_HUMAN_REVIEW',
++    ).values(deal_stage='REVIEWED_HUMAN'))
++    await db.commit()
++    if result.rowcount != 1:
++        raise HTTPException(status_code=404, detail='Mensagem pendente não encontrada.')
++    return {'ok': True, 'sent': False}
+ 
+ 
+ @app.post("/api/vip-setup/checkout-pix")
+@@ -1423,6 +1611,9 @@ async def reset_to_strict_real_treasury_mode(db: AsyncSession = Depends(get_db))
+ 
+ @app.websocket("/ws/telemetry")
+ async def websocket_telemetry(ws: WebSocket):
++    if not same_origin(ws.headers.get("origin"), ws.headers.get("host")) or not valid_session(ws.cookies.get(COOKIE_NAME)):
++        await ws.close(code=1008)
++        return
+     await ws.accept()
+     queue = event_bus.subscribe()
+     try:
+diff --git a/apps/command-center/src/App.tsx b/apps/command-center/src/App.tsx
+index b180b50..798aa73 100644
+--- a/apps/command-center/src/App.tsx
++++ b/apps/command-center/src/App.tsx
+@@ -83,7 +83,37 @@ interface RealLeadItem {
+   whatsapp_url: string;
+ }
+ 
++interface SandboxPaymentEvent {
++  event_id: string;
++  event_type: string;
++  payment_id: string | null;
++  status: string;
++  reason: string | null;
++  invoice_id: string | null;
++  created_at: string;
++}
++
++interface ConversationItem {
++  id: string;
++  contact_name: string;
++  contact_handle: string;
++  inbound_message: string;
++  agent_response: string;
++  deal_stage: string;
++  delivery_status: 'PREPARED' | 'SUBMITTED' | 'UNCERTAIN' | 'NO_AUTO_REPLY' | 'LEGACY_UNKNOWN';
++  created_at: string;
++}
++
+ export default function App() {
++  const [conversationItems, setConversationItems] = useState<ConversationItem[]>([]);
++  const [conversationPending, setConversationPending] = useState(true);
++  const [conversationOffset, setConversationOffset] = useState<number | null>(null);
++  const [conversationError, setConversationError] = useState<string | null>(null);
++  const [conversationBusy, setConversationBusy] = useState(false);
++  const [sandboxEvents, setSandboxEvents] = useState<SandboxPaymentEvent[]>([]);
++  const [sandboxNextOffset, setSandboxNextOffset] = useState<number | null>(null);
++  const [sandboxError, setSandboxError] = useState<string | null>(null);
++  const [sandboxBusy, setSandboxBusy] = useState(false);
+   const [data, setData] = useState<DashboardOverview | null>(null);
+   const [events, setEvents] = useState<TelemetryEvent[]>([]);
+   const [wsConnected, setWsConnected] = useState(false);
+@@ -100,9 +130,9 @@ export default function App() {
+   const [activeVenture, setActiveVenture] = useState<BusinessVentureItem | null>(null);
+ 
+   // Segurança Soberana (Lock Screen JWT + 2FA TOTP)
+-  const [isLocked, setIsLocked] = useState(false);
++  const [isLocked, setIsLocked] = useState(true);
+   const [jwtToken, setJwtToken] = useState<string | null>(null);
+-  const [loginPassword, setLoginPassword] = useState('empire2026');
++  const [loginPassword, setLoginPassword] = useState('');
+   const [loginTotp, setLoginTotp] = useState('');
+   const [loginError, setLoginError] = useState<string | null>(null);
+ 
+@@ -428,6 +458,83 @@ export default function App() {
+ 
+   const logEndRef = useRef<HTMLDivElement | null>(null);
+ 
++  const loadConversations = useCallback(async (pending: boolean, offset: number, append: boolean, signal?: AbortSignal) => {
++    setConversationBusy(true);
++    setConversationError(null);
++    try {
++      const res = await fetch(`/api/conversations?pending_only=${pending}&offset=${offset}&limit=30`, { signal });
++      if (!res.ok) throw new Error('Não foi possível carregar as conversas.');
++      const json: { items: ConversationItem[]; next_offset: number | null } = await res.json();
++      if (signal?.aborted) return;
++      setConversationItems((prev) => append ? [...prev, ...json.items] : json.items);
++      setConversationOffset(json.next_offset);
++    } catch (err) {
++      if (!signal?.aborted) setConversationError('Não foi possível carregar as conversas. Verifique sua sessão.');
++    } finally {
++      if (!signal?.aborted) setConversationBusy(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    if (isLocked || activeTab !== 'OMNICHANNEL') return;
++    const controller = new AbortController();
++    setConversationItems([]);
++    setConversationOffset(null);
++    void loadConversations(conversationPending, 0, false, controller.signal);
++    return () => controller.abort();
++  }, [activeTab, isLocked, conversationPending, loadConversations]);
++
++  const markReviewed = async (id: string) => {
++    setConversationBusy(true);
++    try {
++      const res = await fetch(`/api/conversations/${encodeURIComponent(id)}/reviewed`, { method: 'POST' });
++      if (!res.ok) throw new Error('Falha ao atualizar.');
++      await loadConversations(conversationPending, 0, false);
++    } catch {
++      setConversationError('Não foi possível marcar como revisada.');
++      setConversationBusy(false);
++    }
++  };
++
++  const loadSandboxEvents = useCallback(async (offset = 0, append = false, signal?: AbortSignal) => {
++    setSandboxBusy(true);
++    setSandboxError(null);
++    try {
++      const res = await fetch(`/api/payments/asaas-inbox?offset=${offset}&limit=25`, { signal });
++      if (!res.ok) throw new Error('Sandbox indisponível');
++      const json: { items: SandboxPaymentEvent[]; next_offset: number | null } = await res.json();
++      if (signal?.aborted) return;
++      setSandboxEvents((prev) => append ? [...prev, ...json.items] : json.items);
++      setSandboxNextOffset(json.next_offset);
++    } catch {
++      if (!signal?.aborted) setSandboxError('Sandbox de pagamento não configurado ou indisponível. Nenhuma cobrança foi conciliada.');
++    } finally {
++      if (!signal?.aborted) setSandboxBusy(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    if (isLocked || activeTab !== 'LEDGER') return;
++    const controller = new AbortController();
++    setSandboxEvents([]);
++    setSandboxNextOffset(null);
++    void loadSandboxEvents(0, false, controller.signal);
++    return () => controller.abort();
++  }, [isLocked, activeTab, loadSandboxEvents]);
++
++  const verifySandboxEvent = async (eventId: string) => {
++    setSandboxBusy(true);
++    setSandboxError(null);
++    try {
++      const res = await fetch(`/api/payments/asaas-inbox/${encodeURIComponent(eventId)}/verify`, {method: 'POST'});
++      if (!res.ok) throw new Error('Verificação indisponível.');
++      await loadSandboxEvents();
++    } catch {
++      setSandboxError('Não foi possível consultar o Asaas Sandbox. Nenhum pagamento foi marcado como pago.');
++      setSandboxBusy(false);
++    }
++  };
++
+   const fetchOverview = useCallback(async () => {
+     try {
+       const res = await fetch('/api/dashboard/overview');
+@@ -449,10 +556,11 @@ export default function App() {
+   }, [activePreviewProject]);
+ 
+   useEffect(() => {
+-    fetchOverview();
+-  }, [fetchOverview]);
++    if (!isLocked) fetchOverview();
++  }, [fetchOverview, isLocked]);
+ 
+   useEffect(() => {
++    if (isLocked) return;
+     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+     const wsUrl = `${protocol}//${window.location.host}/ws/telemetry`;
+     let ws: WebSocket | null = null;
+@@ -485,7 +593,7 @@ export default function App() {
+       if (reconnectTimer) window.clearTimeout(reconnectTimer);
+       ws?.close();
+     };
+-  }, [fetchOverview]);
++  }, [fetchOverview, isLocked]);
+ 
+   useEffect(() => {
+     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+@@ -518,7 +626,7 @@ export default function App() {
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify({
+           password: loginPassword,
+-          totp_code: loginTotp || data?.security.current_totp_demo || '',
++          totp_code: loginTotp,
+         }),
+       });
+       const json = await res.json();
+@@ -526,8 +634,9 @@ export default function App() {
+         setLoginError(json.detail || 'Falha na autenticação 2FA.');
+         return;
+       }
+-      setJwtToken(json.token);
++      setJwtToken('authenticated');
+       setIsLocked(false);
++      setLoginPassword('');
+       setLoginTotp('');
+       await fetchOverview();
+     } finally {
+@@ -535,6 +644,21 @@ export default function App() {
+     }
+   };
+ 
++  const lockSession = async () => {
++    try {
++      const res = await fetch('/api/security/logout', { method: 'POST' });
++      if (!res.ok) throw new Error('Não foi possível encerrar a sessão.');
++      setJwtToken(null);
++      setData(null);
++      setEvents([]);
++      setConversationItems([]);
++      setSandboxEvents([]);
++      setIsLocked(true);
++    } catch {
++      window.alert('Não foi possível encerrar a sessão. Tente novamente.');
++    }
++  };
++
+   const toggleKillSwitch = async () => {
+     if (!data || busy) return;
+     setBusy(true);
+@@ -849,17 +973,6 @@ export default function App() {
+     }
+   };
+ 
+-  const settleInvoiceWebhook = async (invoiceId: string) => {
+-    if (busy) return;
+-    setBusy(true);
+-    try {
+-      await fetch(`/api/webhooks/payments/${invoiceId}/settle`, { method: 'POST' });
+-      await fetchOverview();
+-    } finally {
+-      setBusy(false);
+-    }
+-  };
+-
+   const copyText = (id: string, text: string) => {
+     navigator.clipboard?.writeText(text);
+     setCopiedId(id);
+@@ -956,28 +1069,6 @@ export default function App() {
+             </div>
+           </div>
+ 
+-          {data?.security.totp_qr_svg && (
+-            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 flex items-center gap-4">
+-              <div
+-                className="shrink-0"
+-                dangerouslySetInnerHTML={{
+-                  __html: data.security.totp_qr_svg
+-                    .replace('width="192"', 'width="96"')
+-                    .replace('height="192"', 'height="96"'),
+-                }}
+-              />
+-              <div className="text-xs space-y-1">
+-                <div className="text-slate-400">Código 2FA TOTP Atual (Authenticator):</div>
+-                <div className="text-xl font-mono font-bold tracking-widest text-emerald-400">
+-                  {data.security.current_totp_demo}
+-                </div>
+-                <div className="text-[11px] text-slate-500">
+-                  Senha padrão: <code>empire2026</code>
+-                </div>
+-              </div>
+-            </div>
+-          )}
+-
+           <div className="space-y-3">
+             <div>
+               <label className="block text-xs text-slate-400 mb-1">Senha Mestre do CEO</label>
+@@ -991,14 +1082,16 @@ export default function App() {
+             </div>
+             <div>
+               <label className="block text-xs text-slate-400 mb-1">
+-                Código 2FA TOTP (6 dígitos — vazio usa código ativo acima)
++                Código 2FA do seu aplicativo autenticador
+               </label>
+               <input
+                 type="text"
+                 maxLength={6}
+                 value={loginTotp}
+                 onChange={(e) => setLoginTotp(e.target.value)}
+-                placeholder={data?.security.current_totp_demo ?? '000000'}
++                placeholder="000000"
++                inputMode="numeric"
++                required
+                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono tracking-widest text-emerald-300"
+               />
+             </div>
+@@ -1122,7 +1215,7 @@ export default function App() {
+ 
+             {/* LOCK CEO 2FA */}
+             <button
+-              onClick={() => setIsLocked(true)}
++              onClick={() => void lockSession()}
+               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-violet-300 hover:border-violet-500/50 text-xs font-semibold cursor-pointer"
+               title="Bloquear Painel com Senha + 2FA TOTP"
+             >
+@@ -2657,88 +2750,29 @@ export default function App() {
+         {activeTab === 'LEDGER' && (
+           <div className="space-y-6">
+             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+-              <form
+-                onSubmit={createInvoice}
+-                className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 h-fit"
+-              >
+-                <div className="flex items-center gap-2">
+-                  <CreditCard className="w-5 h-5 text-emerald-400" />
+-                  <h2 className="text-sm font-bold uppercase tracking-wider text-white">
+-                    Emitir Cobrança Real (Stripe / Asaas Pix)
+-                  </h2>
+-                </div>
+-
+-                <div className="grid grid-cols-2 gap-3">
+-                  <button
+-                    type="button"
+-                    onClick={() => setInvProvider('ASAAS_PIX')}
+-                    className={`py-2 rounded-xl text-xs font-bold border cursor-pointer ${
+-                      invProvider === 'ASAAS_PIX'
+-                        ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
+-                        : 'bg-slate-950 border-slate-800 text-slate-400'
+-                    }`}
+-                  >
+-                    Asaas Pix Instantâneo (QR)
+-                  </button>
+-                  <button
+-                    type="button"
+-                    onClick={() => setInvProvider('STRIPE')}
+-                    className={`py-2 rounded-xl text-xs font-bold border cursor-pointer ${
+-                      invProvider === 'STRIPE'
+-                        ? 'bg-cyan-500/20 border-cyan-500 text-cyan-300'
+-                        : 'bg-slate-950 border-slate-800 text-slate-400'
+-                    }`}
+-                  >
+-                    Stripe Checkout Global
+-                  </button>
++              <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 h-fit">
++                <div className="flex flex-wrap items-center justify-between gap-2">
++                  <h2 className="text-sm font-bold text-white">Conferência Asaas Sandbox</h2>
++                  <button onClick={() => void loadSandboxEvents()} disabled={sandboxBusy} className="text-xs text-emerald-300 underline">Atualizar</button>
+                 </div>
+-
+-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+-                  <input
+-                    value={invClient}
+-                    onChange={(e) => setInvClient(e.target.value)}
+-                    placeholder="Empresa / Cliente"
+-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-white"
+-                    required
+-                  />
+-                  <input
+-                    value={invEmail}
+-                    onChange={(e) => setInvEmail(e.target.value)}
+-                    placeholder="financeiro@cliente.com"
+-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-white"
+-                  />
++                <p className="text-xs text-amber-300">Ambiente de teste. Verificar não marca pagamento como pago, não movimenta dinheiro e não libera produtos.</p>
++                {sandboxError && <p role="alert" className="text-xs text-rose-300">{sandboxError}</p>}
++                {!sandboxBusy && !sandboxError && sandboxEvents.length === 0 && <p className="text-xs text-slate-400">Nenhum evento de teste registrado.</p>}
++                <div className="space-y-2 max-h-[450px] overflow-y-auto">
++                  {sandboxEvents.map((ev) => <div key={ev.event_id} className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1">
++                    <div className="text-xs font-semibold text-white break-all">{ev.event_type} · {ev.event_id}</div>
++                    <div className="text-[11px] text-slate-400 break-all">Pagamento: {ev.payment_id || '—'} · Fatura: {ev.invoice_id || '—'}</div>
++                    <div className="text-xs text-amber-300">{ev.status === 'VERIFIED_NOT_SETTLED' ? 'Verificado no Sandbox, não liquidado' : ev.status === 'NEEDS_REVIEW' ? 'Requer revisão' : 'Aguardando revisão'}</div>
++                    {ev.reason && <div className="text-[11px] text-slate-400 break-all">Resultado: {ev.reason}</div>}
++                    {ev.event_type === 'PAYMENT_RECEIVED' && <button disabled={sandboxBusy} onClick={() => void verifySandboxEvent(ev.event_id)} className="mt-1 rounded-lg bg-slate-700 px-3 py-1.5 text-xs text-white">Consultar no Sandbox</button>}
++                  </div>)}
+                 </div>
+-
+-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+-                  <input
+-                    value={invDesc}
+-                    onChange={(e) => setInvDesc(e.target.value)}
+-                    placeholder="Descrição do contrato"
+-                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-white"
+-                    required
+-                  />
+-                  <input
+-                    type="number"
+-                    value={invAmount}
+-                    onChange={(e) => setInvAmount(e.target.value)}
+-                    placeholder="Valor USD"
+-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-emerald-400 font-bold"
+-                    required
+-                  />
+-                </div>
+-
+-                <button
+-                  type="submit"
+-                  disabled={busy}
+-                  className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm cursor-pointer"
+-                >
+-                  Gerar Link de Pagamento / Pix QR Code
+-                </button>
+-              </form>
++                {sandboxNextOffset !== null && <button disabled={sandboxBusy} onClick={() => void loadSandboxEvents(sandboxNextOffset, true)} className="text-xs text-emerald-300 underline">Carregar mais eventos</button>}
++              </div>
+ 
+               <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
+                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+-                  Faturas Emitidas & Conciliação Automática via Webhook (
++                  Faturas históricas — confirme no Asaas (
+                   {data?.invoices.length ?? 0})
+                 </h3>
+                 <div className="space-y-3 max-h-[340px] overflow-y-auto">
+@@ -2748,16 +2782,6 @@ export default function App() {
+                       className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center"
+                     >
+                       <div className="flex items-center gap-3.5">
+-                        {inv.pix_qr_svg && (
+-                          <div
+-                            className="w-20 h-20 shrink-0 rounded-lg overflow-hidden bg-slate-950"
+-                            dangerouslySetInnerHTML={{
+-                              __html: inv.pix_qr_svg
+-                                .replace('width="192"', 'width="80"')
+-                                .replace('height="192"', 'height="80"'),
+-                            }}
+-                          />
+-                        )}
+                         <div>
+                           <div className="flex items-center gap-2">
+                             <span className="font-bold text-sm text-white">{inv.client_name}</span>
+@@ -2782,39 +2806,7 @@ export default function App() {
+                         </div>
+                       </div>
+ 
+-                      <div className="flex flex-wrap gap-2 shrink-0">
+-                        {inv.pix_copy_paste && (
+-                          <>
+-                            <button
+-                              onClick={() => copyText(inv.id, inv.pix_copy_paste!)}
+-                              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center gap-1 cursor-pointer"
+-                            >
+-                              <Copy className="w-3.5 h-3.5" />
+-                              {copiedId === inv.id ? 'Pix Copiado!' : 'Pix Copia-e-Cola'}
+-                            </button>
+-                            <a
+-                              href={`https://wa.me/?text=${encodeURIComponent(
+-                                `Olá ${inv.client_name}! Segue o código Pix Copia e Cola referente a ${inv.description} (R$ ${(inv.amount_usd * 5.65).toFixed(2)}):\n\n${inv.pix_copy_paste}`
+-                              )}`}
+-                              target="_blank"
+-                              rel="noreferrer"
+-                              className="px-2.5 py-1.5 rounded-lg bg-emerald-600/25 border border-emerald-500/40 hover:bg-emerald-600/40 text-xs text-emerald-300 font-semibold flex items-center gap-1"
+-                            >
+-                              <MessageSquare className="w-3.5 h-3.5" />
+-                              Cobrar no WhatsApp
+-                            </a>
+-                          </>
+-                        )}
+-                        {inv.status === 'PENDING' && (
+-                          <button
+-                            onClick={() => settleInvoiceWebhook(inv.id)}
+-                            disabled={busy}
+-                            className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs cursor-pointer"
+-                          >
+-                            Confirmar Webhook Pago
+-                          </button>
+-                        )}
+-                      </div>
++
+                     </div>
+                   ))}
+                 </div>
+@@ -3063,42 +3055,42 @@ export default function App() {
+             </div>
+ 
+             <div className="lg:col-span-7 space-y-3">
+-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+-                Histórico Omnicanal — Suporte 24h & Funil de Vendas ({data?.interactions.length ?? 0}
+-                )
+-              </h3>
+-              <div className="space-y-3 max-h-[600px] overflow-y-auto">
+-                {data?.interactions.map((it) => (
+-                  <div
+-                    key={it.id}
+-                    className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-2"
+-                  >
+-                    <div className="flex items-center justify-between">
+-                      <div>
+-                        <span className="font-bold text-sm text-white">{it.contact_name}</span>
+-                        <span className="ml-2 text-xs text-slate-400">({it.contact_handle})</span>
+-                      </div>
+-                      <span
+-                        className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+-                          it.deal_stage === 'CLOSED_WON'
+-                            ? 'bg-emerald-500/20 text-emerald-400'
+-                            : 'bg-sky-500/20 text-sky-300'
+-                        }`}
+-                      >
+-                        {it.deal_stage}
+-                        {it.deal_value_usd > 0 ? ` • +$${it.deal_value_usd.toLocaleString()}` : ''}
+-                      </span>
+-                    </div>
+-                    <div className="bg-slate-950/70 rounded-xl p-2.5 text-xs text-slate-300">
+-                      <strong className="text-slate-400">Entrada:</strong> {it.inbound_message}
+-                    </div>
+-                    <div className="bg-emerald-950/20 border border-emerald-500/20 rounded-xl p-2.5 text-xs text-emerald-200">
+-                      <strong className="text-emerald-400">Agente Autónomo:</strong>{' '}
+-                      {it.agent_response}
++              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
++                <div className="flex flex-wrap items-center justify-between gap-2">
++                  <h3 className="text-sm font-bold text-white">Conversas do WhatsApp</h3>
++                  <button onClick={() => void loadConversations(conversationPending, 0, false)} disabled={conversationBusy} className="text-xs text-emerald-300 underline">Atualizar</button>
++                </div>
++                <p className="text-xs text-slate-400">Mensagens recebidas durante o intervalo de 60 segundos ficam aqui para revisão. Nenhum botão desta lista envia mensagem automaticamente.</p>
++                <div className="flex gap-2">
++                  <button onClick={() => setConversationPending(true)} className={`rounded-lg px-3 py-2 text-xs font-semibold ${conversationPending ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Precisam de revisão</button>
++                  <button onClick={() => setConversationPending(false)} className={`rounded-lg px-3 py-2 text-xs font-semibold ${!conversationPending ? 'bg-emerald-400 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Histórico</button>
++                </div>
++              </div>
++              {conversationError && <p role="alert" className="text-xs text-rose-300">{conversationError}</p>}
++              {!conversationBusy && conversationItems.length === 0 && !conversationError && <p className="text-xs text-slate-400">Nenhuma conversa nesta lista.</p>}
++              <div className="space-y-3 max-h-[720px] overflow-y-auto">
++                {conversationItems.map((it) => (
++                  <div key={it.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-2">
++                    <div className="flex flex-wrap justify-between gap-2">
++                      <div><span className="font-bold text-sm text-white">{it.contact_name}</span><span className="ml-2 text-xs text-slate-400">({it.contact_handle})</span></div>
++                      <span className="text-[10px] text-slate-400">{it.created_at ? new Date(it.created_at).toLocaleString('pt-BR') : ''}</span>
+                     </div>
++                    <div className="bg-slate-950/70 rounded-xl p-2.5 text-xs text-slate-300"><strong className="text-slate-400">Cliente:</strong> {it.inbound_message}</div>
++                    {it.agent_response && <div className="bg-emerald-950/20 border border-emerald-500/20 rounded-xl p-2.5 text-xs text-emerald-200"><strong>Resposta preparada:</strong> {it.agent_response}</div>}
++                    <p className="text-[11px] text-slate-400">
++                      {it.delivery_status === 'SUBMITTED' ? 'Chamada de envio concluída; entrega e leitura não confirmadas.' :
++                       it.delivery_status === 'PREPARED' ? 'Resposta preparada; envio não confirmado.' :
++                       it.delivery_status === 'UNCERTAIN' ? 'Resultado do envio incerto. Confira a conversa antes de agir.' :
++                       it.delivery_status === 'NO_AUTO_REPLY' ? 'Sem resposta automática.' : 'Registro antigo; envio não verificado.'}
++                    </p>
++                    {it.deal_stage === 'WAIT_HUMAN_REVIEW' && <div className="flex flex-wrap items-center gap-3 pt-1">
++                      {/^[0-9]{12,15}$/.test(it.contact_handle) && <a href={`https://wa.me/${it.contact_handle}`} target="_blank" rel="noreferrer" className="text-xs font-semibold text-emerald-300 underline">Abrir conversa no WhatsApp</a>}
++                      <button disabled={conversationBusy} onClick={() => void markReviewed(it.id)} className="rounded-lg bg-slate-700 px-3 py-1.5 text-xs font-semibold text-white">Marcar revisada</button>
++                    </div>}
+                   </div>
+                 ))}
+               </div>
++              {conversationOffset !== null && <button disabled={conversationBusy} onClick={() => void loadConversations(conversationPending, conversationOffset, true)} className="rounded-lg bg-slate-800 px-3 py-2 text-xs text-white">Carregar mais</button>}
+             </div>
+           </div>
+         )}
+@@ -3214,37 +3206,14 @@ export default function App() {
+                     </h2>
+                   </div>
+                   <button
+-                    onClick={() => setIsLocked(true)}
++                    onClick={() => void lockSession()}
+                     className="px-3 py-1 rounded-lg bg-violet-500 hover:bg-violet-400 text-slate-950 font-bold text-xs cursor-pointer"
+                   >
+                     Testar Ecrã Lock 2FA
+                   </button>
+                 </div>
+ 
+-                {data?.security && (
+-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 flex items-center gap-4">
+-                    <div
+-                      className="shrink-0"
+-                      dangerouslySetInnerHTML={{
+-                        __html: data.security.totp_qr_svg
+-                          .replace('width="192"', 'width="96"')
+-                          .replace('height="192"', 'height="96"'),
+-                      }}
+-                    />
+-                    <div className="text-xs space-y-1">
+-                      <div className="text-slate-400">Segredo Base32 (Google Authenticator):</div>
+-                      <div className="font-mono text-violet-300 font-bold">
+-                        {data.security.totp_secret_b32}
+-                      </div>
+-                      <div className="text-slate-400 pt-1">
+-                        Código TOTP Ativo ({data.security.totp_seconds_remaining}s):{' '}
+-                        <strong className="font-mono text-emerald-400 text-sm">
+-                          {data.security.current_totp_demo}
+-                        </strong>
+-                      </div>
+-                    </div>
+-                  </div>
+-                )}
++                <p className="text-xs text-slate-400">O código 2FA deve ser consultado no seu aplicativo autenticador. Segredos não são exibidos no painel.</p>
+ 
+                 <div className="space-y-1 max-h-28 overflow-y-auto pt-1">
+                   {data?.security_logs.slice(0, 4).map((sl) => (
+diff --git a/apps/wa-bridge/server.js b/apps/wa-bridge/server.js
+index baae960..4f78e6a 100644
+--- a/apps/wa-bridge/server.js
++++ b/apps/wa-bridge/server.js
+@@ -146,6 +146,7 @@ function postJsonLocal(urlPath, payload) {
+         method: 'POST',
+         headers: {
+           'Content-Type': 'application/json',
++          'X-WA-Internal-Secret': process.env.WA_INTERNAL_SECRET || '',
+           'Content-Length': body.length,
+         },
+         timeout: 25000,
+@@ -404,6 +405,8 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
+ 
+       const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
+         remote_jid: remoteJid,
++        phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid,
++        message_id: msgId,
+         phone: realPhoneRaw,
+         contact_name: (lastCust && lastCust.pushName) || `Empresa ${realPhoneRaw.slice(-4)}`,
+         message: `[CEO_HANDOFF_TRIGGER] Dica:${hint || 'Geral'} | Cliente disse: ${lastCustText || 'Pediu informações'}`,
+@@ -414,10 +417,12 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
+           await sock.sendPresenceUpdate('composing', remoteJid);
+           await new Promise((r) => setTimeout(r, 1500));
+           await sock.sendMessage(remoteJid, { text: replyData.auto_reply });
++          await postJsonLocal('/api/internal/wa-delivery-status', { phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid, message_id: msgId, result: 'SUBMITTED' });
+           await sock.sendPresenceUpdate('paused', remoteJid);
+           sentCount += 1;
+           return true;
+         } catch (e) {
++          await postJsonLocal('/api/internal/wa-delivery-status', { phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid, message_id: msgId, result: 'UNCERTAIN' });
+           console.error('[WA-BRIDGE] Magic command send error:', e?.message);
+         }
+       }
+@@ -447,16 +452,13 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
+         msg.message?.ephemeralMessage?.message?.imageMessage ||
+         null;
+       let text = extractMessageText(msg);
+-      let audioBase64 = '';
+-      let audioMime = 'audio/ogg';
+-      let imageBase64 = '';
+-      let imageMime = 'image/jpeg';
+-
++      // Resposta conservadora: não baixa nem envia áudio ou imagem para IA.
+       if (!text && !audioMsg && !imageMsg) return false;
+ 
+       const low = (text || '').toLowerCase();
++      const optOut = /^(pare|parar|sair|cancelar|descadastrar|não quero|nao quero|não tenho interesse|nao tenho interesse)[\s.!]*$/i.test(low) || /\b(não|nao)\s+(me\s+)?(mande|envie|chame|contate|ligue)\b/i.test(low);
+       const mentionsProductOrIntent =
+-        BOT_SIGNATURE_WORDS.some((w) => low.includes(w)) ||
++        optOut || BOT_SIGNATURE_WORDS.some((w) => low.includes(w)) ||
+         COMMERCIAL_REPLY_INTENTS.some((w) => low.includes(w));
+ 
+       if (!forceCommercial && !isKnownCommercial(remoteJid, altJid) && !mentionsProductOrIntent) {
+@@ -467,53 +469,16 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
+       if (altJid) registerCommercial(altJid);
+       if (msgId) answeredMsgIds.add(msgId);
+ 
+-      if (!text && audioMsg && typeof downloadMediaMessage === 'function') {
+-        try {
+-          const buf = await downloadMediaMessage(
+-            msg,
+-            'buffer',
+-            {},
+-            { logger: pino({ level: 'silent' }), reuploadRequest: activeSock.updateMediaMessage }
+-          );
+-          if (buf && buf.length > 0 && buf.length <= 4 * 1024 * 1024) {
+-            audioBase64 = Buffer.from(buf).toString('base64');
+-            audioMime = String(audioMsg.mimetype || 'audio/ogg').split(';')[0].trim();
+-          }
+-        } catch (e) {
+-          console.error('[WA-BRIDGE] Audio download error:', e?.message);
+-        }
+-        if (!audioBase64) {
+-          text = '[Áudio recebido — pedir resumo rápido ou oferecer demonstração]';
+-        }
+-      }
+-
+-      if (imageMsg && typeof downloadMediaMessage === 'function') {
+-        try {
+-          const buf = await downloadMediaMessage(
+-            msg,
+-            'buffer',
+-            {},
+-            { logger: pino({ level: 'silent' }), reuploadRequest: activeSock.updateMediaMessage }
+-          );
+-          if (buf && buf.length > 0 && buf.length <= 4 * 1024 * 1024) {
+-            imageBase64 = Buffer.from(buf).toString('base64');
+-            imageMime = String(imageMsg.mimetype || 'image/jpeg').split(';')[0].trim();
+-          }
+-        } catch (e) {
+-          console.error('[WA-BRIDGE] Image download error:', e?.message);
+-        }
+-      }
+-
+       const pushName = msg.pushName || `Cliente ${realPhoneRaw}`;
+       const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
+         remote_jid: remoteJid,
++        phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid,
++        message_id: msgId,
+         phone: realPhoneRaw,
+         contact_name: pushName,
+-        message: text || (imageBase64 ? '[FOTO_WHATSAPP]' : '[ÁUDIO_WHATSAPP]'),
+-        audio_base64: audioBase64,
+-        audio_mime: audioMime,
+-        image_base64: imageBase64,
+-        image_mime: imageMime,
++        message: text || (imageMsg ? '[FOTO_WHATSAPP]' : '[ÁUDIO_WHATSAPP]'),
++        has_audio: !!audioMsg,
++        has_image: !!imageMsg,
+       });
+ 
+       if (replyData && replyData.auto_reply && sock && connectionStatus === 'CONNECTED') {
+@@ -521,10 +486,12 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
+           await sock.sendPresenceUpdate('composing', remoteJid);
+           await new Promise((r) => setTimeout(r, 1800));
+           await sock.sendMessage(remoteJid, { text: replyData.auto_reply });
++          await postJsonLocal('/api/internal/wa-delivery-status', { phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid, message_id: msgId, result: 'SUBMITTED' });
+           await sock.sendPresenceUpdate('paused', remoteJid);
+           sentCount += 1;
+           return true;
+         } catch (e) {
++          await postJsonLocal('/api/internal/wa-delivery-status', { phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid, message_id: msgId, result: 'UNCERTAIN' });
+           console.error('[WA-BRIDGE] Auto-reply send error:', e?.message);
+         }
+       }
+@@ -553,33 +520,9 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
+     }
+ 
+     async function sweepUnansweredCommercialChats() {
+-      if (sweepingBacklog || !sock || connectionStatus !== 'CONNECTED') return 0;
+-      sweepingBacklog = true;
+-      let answeredNow = 0;
+-      try {
+-        const nowSec = Math.floor(Date.now() / 1000);
+-        for (const [jid, msgs] of chatHistoryCache.entries()) {
+-          if (!msgs.length || answeredNow >= 15) continue;
+-          const lastMsg = msgs[msgs.length - 1];
+-          if (!lastMsg || lastMsg.key?.fromMe) continue;
+-          const ageSec = nowSec - getMsgTimestampSec(lastMsg);
+-          if (ageSec > 72 * 3600) continue; // ignora conversas com mais de 3 dias
+-          const altJid = lastMsg.key?.remoteJidAlt || lastMsg.key?.senderPn || '';
+-          const hadBotPitch = msgs.some(
+-            (m) => m.key?.fromMe && BOT_SIGNATURE_WORDS.some((w) => extractMessageText(m).toLowerCase().includes(w))
+-          );
+-          if (hadBotPitch || isKnownCommercial(jid, altJid)) {
+-            const ok = await processIncomingCustomerMsg(lastMsg, { forceCommercial: true });
+-            if (ok) {
+-              answeredNow += 1;
+-              await new Promise((r) => setTimeout(r, 4500));
+-            }
+-          }
+-        }
+-      } finally {
+-        sweepingBacklog = false;
+-      }
+-      return answeredNow;
++      // Não enviar respostas retroativas automaticamente após reconexão: a
++      // versão anterior não guardava IDs dos eventos históricos no banco.
++      return 0;
+     }
+     triggerSweepFn = sweepUnansweredCommercialChats;
+ 
+@@ -613,7 +556,7 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
+ // Restaura backup criptografado do Banco Cloud com retentativas até o API Gateway subir!
+ function restoreFromCloudWithRetry(attemptsLeft = 40) {
+   const req = http.get(
+-    { hostname: '127.0.0.1', port: parseInt(API_PORT, 10), path: '/api/internal/wa-auth-restore', timeout: 12000 },
++    { hostname: '127.0.0.1', port: parseInt(API_PORT, 10), path: '/api/internal/wa-auth-restore', timeout: 12000, headers: { 'X-WA-Internal-Secret': process.env.WA_INTERNAL_SECRET || '' } },
+     (res) => {
+       let chunks = '';
+       res.on('data', (c) => (chunks += c));
+diff --git a/packages/database/models.py b/packages/database/models.py
+index b6c277d..7f8c85e 100644
+--- a/packages/database/models.py
++++ b/packages/database/models.py
+@@ -131,6 +131,49 @@ class OmnichannelInteraction(Base):
+     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+ 
+ 
++class WhatsAppInboundClaim(Base):
++    """Marca durável de processamento at-most-once de mensagem recebida."""
++    __tablename__ = "whatsapp_inbound_claims"
++
++    message_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
++    contact_key: Mapped[str] = mapped_column(String(64), nullable=False)
++    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
++
++
++class WhatsAppReplyDelivery(Base):
++    """Status local da tentativa, não é comprovante de entrega ou leitura."""
++    __tablename__ = "whatsapp_reply_deliveries"
++
++    message_hash: Mapped[str] = mapped_column(String(64), ForeignKey("whatsapp_inbound_claims.message_hash"), primary_key=True)
++    interaction_id: Mapped[str] = mapped_column(String(64), ForeignKey("omnichannel_interactions.id"), unique=True, nullable=False)
++    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PREPARED")
++    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
++
++
++class WhatsAppReplyWindow(Base):
++    """Limite durável de respostas automáticas por contato."""
++    __tablename__ = "whatsapp_reply_windows"
++
++    contact_key: Mapped[str] = mapped_column(String(64), primary_key=True)
++    last_reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
++
++
++class WhatsAppHandoffWindow(Base):
++    """Limite durável para comandos manuais ⚡ por número normalizado."""
++    __tablename__ = "whatsapp_handoff_windows"
++
++    contact_key: Mapped[str] = mapped_column(String(64), primary_key=True)
++    last_sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
++
++
++class WhatsAppContactPreference(Base):
++    """Preferência de não contato. Reativação exige revisão humana."""
++    __tablename__ = "whatsapp_contact_preferences"
++
++    contact_key: Mapped[str] = mapped_column(String(64), primary_key=True)
++    opted_out_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
++
++
+ class SemanticMemoryChunk(Base):
+     __tablename__ = "semantic_memory"
+ 
+@@ -162,6 +205,29 @@ class PaymentInvoice(Base):
+     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+ 
+ 
++class PixInvoiceExpectation(Base):
++    """Montante BRL exato do QR criado pelo provedor (somente novas faturas)."""
++    __tablename__ = "pix_invoice_expectations"
++
++    invoice_id: Mapped[str] = mapped_column(String(64), ForeignKey("payment_invoices.id"), primary_key=True)
++    amount_brl_cents: Mapped[int] = mapped_column(Integer, nullable=False)
++    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
++
++
++class AsaasWebhookInbox(Base):
++    """Fila durável de eventos em homologação; não concede acesso nem liquida."""
++    __tablename__ = "asaas_webhook_inbox"
++
++    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
++    event_type: Mapped[str] = mapped_column(String(96), nullable=False)
++    payment_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
++    status: Mapped[str] = mapped_column(String(32), default="PENDING_REVIEW", nullable=False)
++    verification_reason: Mapped[Optional[str]] = mapped_column(String(96), nullable=True)
++    invoice_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
++    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
++    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
++
++
+ class RuntimeVault(Base):
+     __tablename__ = "runtime_vault"
+ 
+diff --git a/packages/leads/auto_outreach.py b/packages/leads/auto_outreach.py
+index 492871d..e57cb16 100644
+--- a/packages/leads/auto_outreach.py
++++ b/packages/leads/auto_outreach.py
+@@ -109,7 +109,8 @@ class AutonomousOutreachEngine:
+       4. Responde clientes 24/7 e emite Pix Asaas (plano cheio ou Ativação Expressa R$ 49,90)!
+     """
+ 
+-    _autopilot_enabled: bool = True
++    # Por segurança, não iniciar envios automaticamente após deploy/reinício.
++    _autopilot_enabled: bool = False
+     _daemon_task: asyncio.Task | None = None
+     _running_campaign: bool = False
+     _rotation_index: int = 0
+@@ -255,107 +256,19 @@ class AutonomousOutreachEngine:
+                 await asyncio.sleep(25)
+ 
+     @classmethod
+-    async def send_single_lead_now(
+-        cls,
+-        db: AsyncSession,
+-        business_name: str,
+-        phone_digits: str,
+-        message: str,
+-        venture_name: str = "AgendaCorte Pro AI",
+-        price_usd: float = 19.0,
+-    ) -> dict:
+-        wa_state = await EvolutionWhatsAppManager.get_status(db)
+-        if wa_state.get("status") != "CONNECTED":
+-            return {"ok": False, "error": "WHATSAPP_NOT_CONNECTED"}
+-
+-        res = await EvolutionWhatsAppManager.send_real_whatsapp(phone_digits, message)
+-        if not res.get("ok"):
+-            return res
+-
+-        cls._refresh_daily_counter()
+-        cls._daily_sent_count += 1
+-        cls._total_sent_session += 1
+-
+-        interaction = OmnichannelInteraction(
+-            id=f"omni-{uuid.uuid4().hex[:10]}",
+-            channel="WHATSAPP_REAL_AUTO",
+-            department="SALES",
+-            contact_name=business_name[:80],
+-            contact_handle=phone_digits,
+-            inbound_message=f"[Disparo Autónomo — {venture_name}]",
+-            agent_response=message[:1500],
+-            sentiment="OUTBOUND_SENT",
+-            deal_stage="CONTACTED_AUTO",
+-            deal_value_usd=price_usd,
+-        )
+-        db.add(interaction)
+-        await db.commit()
+-
+-        await event_bus.publish(
+-            event_type="AUTO_WHATSAPP_SENT",
+-            agent_slug="sales-closer",
+-            level="SUCCESS",
+-            message=f"📲 [Piloto 24/7] Agente abordou sozinho: {business_name} ({phone_digits})!",
+-        )
+-        return {"ok": True, "jid": res.get("jid")}
++    async def send_single_lead_now(cls, db: AsyncSession, business_name: str, phone_digits: str,
++                                   message: str, venture_name: str = "AgendaCorte Pro AI",
++                                   price_usd: float = 19.0) -> dict:
++        # Até existir consentimento verificável e deduplicação durável, nem o
++        # painel nem o piloto enviam abordagens de marketing automaticamente.
++        return {"ok": False, "error": "OUTBOUND_DISABLED", "message": "Abordagem automática desativada até revisão de consentimento."}
+ 
+     @classmethod
+-    async def start_autonomous_batch(
+-        cls,
+-        db: AsyncSession,
+-        niche: str,
+-        city: str,
+-        venture_id: str | None = None,
+-        public_base_url: str = "https://autonomous-empire-os.onrender.com",
+-        max_leads: int = 5,
+-    ) -> dict:
+-        wa_state = await EvolutionWhatsAppManager.get_status(db)
+-        if wa_state.get("status") != "CONNECTED":
+-            return {
+-                "ok": False,
+-                "error": "WHATSAPP_NOT_CONNECTED",
+-                "message": "Conecta primeiro o teu WhatsApp com o Código de 8 Dígitos para os agentes poderem enviar mensagens sozinhos!",
+-            }
+-
+-        if cls._running_campaign:
+-            return {
+-                "ok": True,
+-                "already_running": True,
+-                "stats": cls.get_campaign_status(),
+-            }
+-
+-        hunt = await RealLeadHunter.hunt_real_businesses(
+-            db=db,
+-            niche=niche,
+-            city=city,
+-            venture_id=venture_id,
+-            public_base_url=public_base_url,
+-        )
+-        leads_with_phone = [l for l in hunt.get("leads", []) if l.get("phone_digits")]
+-
+-        existing_res = await db.execute(select(OmnichannelInteraction.contact_handle))
+-        already_contacted = {str(r[0]) for r in existing_res.all() if r[0]}
+-        fresh_leads = [l for l in leads_with_phone if l["phone_digits"] not in already_contacted][:max_leads]
+-
+-        cls._running_campaign = True
+-        cls._last_campaign_stats = {
+-            "running": True,
+-            "target_query": f"{niche} — {city}",
+-            "queued": len(fresh_leads),
+-            "sent": 0,
+-            "skipped_no_wa": 0,
+-            "last_contacted": cls._last_campaign_stats.get("last_contacted", ""),
+-        }
+-
+-        asyncio.create_task(cls._background_cadence_worker(fresh_leads))
+-
+-        return {
+-            "ok": True,
+-            "queued_with_phone": len(fresh_leads),
+-            "total_found": hunt.get("count", 0),
+-            "leads": hunt.get("leads", []),
+-            "stats": cls.get_campaign_status(),
+-        }
++    async def start_autonomous_batch(cls, db: AsyncSession, niche: str, city: str,
++                                     venture_id: str | None = None,
++                                     public_base_url: str = "https://autonomous-empire-os.onrender.com",
++                                     max_leads: int = 5) -> dict:
++        return {"ok": False, "error": "OUTBOUND_DISABLED", "message": "Campanhas automáticas desativadas até revisão de consentimento."}
+ 
+     @classmethod
+     async def _background_cadence_worker(cls, leads: list[dict]) -> None:
+@@ -397,418 +310,8 @@ class AutonomousOutreachEngine:
+                     ),
+                 )
+ 
+-    @classmethod
+-    async def handle_real_whatsapp_reply(
+-        cls,
+-        db: AsyncSession,
+-        phone: str,
+-        contact_name: str,
+-        message: str,
+-        audio_base64: str = "",
+-        audio_mime: str = "audio/ogg",
+-        image_base64: str = "",
+-        image_mime: str = "image/jpeg",
+-    ) -> str:
+-        import urllib.parse
+-
+-        was_audio = False
+-        was_image = False
+-        is_ceo_handoff = message.startswith("[CEO_HANDOFF_TRIGGER]")
+-
+-        if audio_base64:
+-            transcribed = await MultiModelLLMGateway.transcribe_whatsapp_audio(
+-                db=db,
+-                audio_base64=audio_base64,
+-                mime_type=audio_mime,
+-            )
+-            if transcribed:
+-                message = transcribed
+-                was_audio = True
+-                await event_bus.publish(
+-                    event_type="WHATSAPP_AUDIO_TRANSCRIBED",
+-                    agent_slug="sales-closer",
+-                    level="INFO",
+-                    message=f"🎙️ [Áudio WhatsApp Ouvido] {contact_name}: \"{transcribed[:95]}\"",
+-                )
+-
+-        if image_base64:
+-            vision_desc = await MultiModelLLMGateway.analyze_whatsapp_image(
+-                db=db,
+-                image_base64=image_base64,
+-                mime_type=image_mime,
+-                caption="" if message == "[FOTO_WHATSAPP]" else message,
+-            )
+-            if vision_desc:
+-                was_image = True
+-                message = vision_desc
+-                await event_bus.publish(
+-                    event_type="WHATSAPP_IMAGE_ANALYZED",
+-                    agent_slug="sales-closer",
+-                    level="INFO",
+-                    message=f"📸 [Foto Analisada Vision] {contact_name}: \"{vision_desc[:95]}\"",
+-                )
+-                if "[COMPROVANTE_PIX]" in vision_desc:
+-                    await EvolutionWhatsAppManager.notify_owner_vip(
+-                        f"📸💰 *[CLIENTE ENVIOU FOTO DE COMPROVANTE PIX!]*\n\n"
+-                        f"🏪 *Cliente:* {contact_name} (+{phone})\n"
+-                        f"🔍 *Leitura IA:* {vision_desc}\n"
+-                        f"🛠️ Link do Portal já foi enviado na conversa!"
+-                    )
+-
+-        hist_res = await db.execute(
+-            select(OmnichannelInteraction)
+-            .where(OmnichannelInteraction.contact_handle == phone)
+-            .order_by(desc(OmnichannelInteraction.created_at))
+-            .limit(4)
+-        )
+-        history = hist_res.scalars().all()
+-        first_warm_reply = is_ceo_handoff or (len(history) == 1 and history[0].deal_stage == "CONTACTED_AUTO")
+-
+-        ven_res = await db.execute(select(BusinessVenture))
+-        ventures = ven_res.scalars().all()
+-        chosen_venture = ventures[0] if ventures else None
+-        hist_blob = (" ".join(f"{h.inbound_message} {h.agent_response}" for h in history) + " " + message).lower()
+-        for v in ventures:
+-            if v.name.lower() in hist_blob:
+-                chosen_venture = v
+-                break
+-        else:
+-            for kw_map, v_match in [
+-                (("barb", "salão", "salao", "corte"), "AgendaCorte"),
+-                (("ofic", "mecân", "mecan", "carro"), "OficinaZap"),
+-                (("pizz", "hamb", "lanch", "delivery"), "ZapPedido"),
+-                (("imob", "corretor", "imóv", "imov"), "ImobZap"),
+-                (("pet", "tosa", "vet"), "PetAgenda"),
+-                (("estética auto", "polimento", "lava"), "AutoEstética"),
+-                (("clín", "clin", "odont", "dentist", "méd"), "NexusFlow"),
+-            ]:
+-                if any(k in hist_blob for k in kw_map):
+-                    found_v = next((x for x in ventures if v_match.lower() in x.name.lower()), None)
+-                    if found_v:
+-                        chosen_venture = found_v
+-                        break
+-
+-        ven_name = chosen_venture.name if chosen_venture else "AgendaCorte Pro AI"
+-        price_usd = chosen_venture.monthly_price_usd if chosen_venture else 19.0
+-        price_brl = f"{round(price_usd * 5.65, 2):.2f}".replace(".", ",")
+-        clean_cname = contact_name.replace("Cliente ", "").strip() or "Sua Empresa"
+-        pub_url = (
+-            f"https://autonomous-empire-os.onrender.com/demo?loja={urllib.parse.quote(clean_cname[:45])}"
+-            f"&produto={urllib.parse.quote(ven_name)}&preco={price_usd}"
+-        )
+-
+-        if was_image and "[COMPROVANTE_PIX]" in message:
+-            portal_link = f"https://autonomous-empire-os.onrender.com/meu-robo/vip-{phone[-6:]}"
+-            ref_link = f"https://autonomous-empire-os.onrender.com/vitrine?ref={phone[-6:]}"
+-            receipt_reply = (
+-                f"✅ Recebemos seu comprovante aqui, *{contact_name}*! Muito obrigado pela confiança!\n\n"
+-                f"🛠️ Já liberei seu Portal Exclusivo para preencher seus horários, serviços e chave Pix em 1 minuto:\n"
+-                f"👉 {portal_link}\n\n"
+-                f"🎁 E aqui está seu link Indique & Ganhe (+1 Mês Grátis a cada amigo lojista indicado): {ref_link}"
+-            )
+-            db.add(
+-                OmnichannelInteraction(
+-                    id=f"omni-{uuid.uuid4().hex[:10]}",
+-                    channel="WHATSAPP_REAL_AUTO",
+-                    department="SALES",
+-                    contact_name=contact_name[:80],
+-                    contact_handle=phone,
+-                    inbound_message=f"[📸 Comprovante]: {message[:800]}",
+-                    agent_response=receipt_reply,
+-                    sentiment="PAID_RECEIPT",
+-                    deal_stage="RECEIPT_RECEIVED",
+-                    deal_value_usd=0.0,
+-                )
+-            )
+-            await db.commit()
+-            return receipt_reply
+-
+-        low_msg = message.lower()
+-        wants_vip_197 = (not is_ceo_handoff) and any(kw in low_msg for kw in VIP_TURNKEY_KEYWORDS)
+-        has_price_objection = (not is_ceo_handoff) and (not wants_vip_197) and any(kw in low_msg for kw in OBJECTION_KEYWORDS)
+-        wants_to_buy = (not is_ceo_handoff) and (
+-            any(kw in low_msg for kw in BUYING_KEYWORDS)
+-            or (not first_warm_reply and any(w in low_msg for w in ("bora", "fechado", "quero sim", "pode gerar")))
+-        )
+-
+-        pix_block = ""
+-        deal_stage = "IN_NEGOTIATION"
+-        billed_usd = price_usd
+-
+-        if wants_vip_197:
+-            billed_usd = 34.8673
+-            inv = await PaymentGatewayManager.create_invoice(
+-                db=db,
+-                provider="ASAAS_PIX",
+-                client_name=contact_name[:75],
+-                client_email=f"{phone}@whatsapp.com.br",
+-                description=f"Setup VIP Chave na Mao {ven_name}",
+-                amount_usd=billed_usd,
+-            )
+-            if inv.pix_copy_paste:
+-                pix_block = (
+-                    f"\n\n👑 *Setup VIP Chave na Mão ({ven_name} — Entregamos 100% Configurado Hoje + 30 Dias Inclusos por R$ 197,00 no Pix):*\n\n"
+-                    f"{inv.pix_copy_paste}\n\n"
+-                    f"Assim que confirmar o Pix, nossa engenharia monta tudo com seus serviços e horários hoje mesmo!"
+-                )
+-                deal_stage = "PIX_VIP_197_SENT"
+-        elif has_price_objection:
+-            billed_usd = 8.8319
+-            inv = await PaymentGatewayManager.create_invoice(
+-                db=db,
+-                provider="ASAAS_PIX",
+-                client_name=contact_name[:75],
+-                client_email=f"{phone}@whatsapp.com.br",
+-                description=f"Ativacao {ven_name}",
+-                amount_usd=billed_usd,
+-            )
+-            if inv.pix_copy_paste:
+-                pix_block = (
+-                    f"\n\n🔥 *Condição Especial Liberada — Ativação + 15 Dias de Uso ({ven_name}) por apenas R$ 49,90 no Pix:*\n\n"
+-                    f"{inv.pix_copy_paste}\n\n"
+-                    f"É só copiar e colar no seu banco que já liberamos seu sistema personalizado agora!"
+-                )
+-                deal_stage = "PIX_PROMO_49_SENT"
+-        elif wants_to_buy:
+-            inv = await PaymentGatewayManager.create_invoice(
+-                db=db,
+-                provider="ASAAS_PIX",
+-                client_name=contact_name[:75],
+-                client_email=f"{phone}@whatsapp.com.br",
+-                description=f"{ven_name} Mensal",
+-                amount_usd=price_usd,
+-            )
+-            if inv.pix_copy_paste:
+-                pix_block = (
+-                    f"\n\n✅ *Aqui está o seu Pix Copia e Cola oficial ({ven_name} — R$ {price_brl}/mês):*\n\n"
+-                    f"{inv.pix_copy_paste}\n\n"
+-                    f"Assim que confirmar o Pix, nosso sistema já libera seu painel automaticamente!"
+-                )
+-                deal_stage = "PIX_SENT_AUTO"
+-
+-        llm_reply = await MultiModelLLMGateway.complete(
+-            db=db,
+-            agent_id="agent-sales",
+-            task_id=None,
+-            system_prompt=(
+-                f"És o consultor comercial humano e simpático do SaaS '{ven_name}' (R$ {price_brl}/mês no Pix, sem fidelidade). "
+-                + ("Acabaste de ouvir o áudio de voz do cliente! Confirma naturalmente que ouviste o áudio dele. " if was_audio else "")
+-                + (
+-                    "Acabaste de analisar a foto/tabela de preços que o cliente mandou! Cita os serviços e preços reais que leste na imagem dele e confirma que o nosso robô já usa exatamente essa tabela para agendar e cobrar no Pix! "
+-                    if was_image
+-                    else ""
+-                )
+-                + (
+-                    f"Entrega o Diagnóstico Rápido prometido: dá Nota 6.8/10 hoje (porque fora do horário comercial e no pico o cliente espera e vai pro concorrente) e mostra que com o {ven_name} sobe para Nota 10/10 atendendo 24h, agendando e cobrando no Pix sozinho. Inclui o link exclusivo já com o nome da empresa dele {pub_url} e oferece as 2 opções: Teste Express 15 dias por R$ 49,90 (responda 'QUERO TESTAR') ou Setup VIP Chave na Mão 100% configurado hoje por R$ 197 (responda 'SETUP VIP')."
+-                    if first_warm_reply and not pix_block
+-                    else (
+-                        "Responde no WhatsApp em português do Brasil natural, curto (máximo 3 frases diretas), tirando a dúvida do cliente "
+-                        + (
+-                            "e avisando que geraste o Pix de R$ 197,00 do Setup VIP Chave na Mão logo abaixo."
+-                            if wants_vip_197 and pix_block
+-                            else (
+-                                "e avisando que liberaste uma ativação promocional de 15 dias por apenas R$ 49,90 com o Pix Copia e Cola logo abaixo."
+-                                if has_price_objection and pix_block
+-                                else (
+-                                    "e avisando que já geraste o Pix Copia e Cola logo abaixo para ativar agora."
+-                                    if pix_block
+-                                    else f"e apresentando o painel exclusivo da empresa dele {pub_url} com 2 opções no Pix: Teste 15 dias por R$ 49,90 ('QUERO TESTAR') ou Entrega Pronta Chave na Mão por R$ 197 ('SETUP VIP')."
+-                                )
+-                            )
+-                        )
+-                    )
+-                )
+-            ),
+-            user_prompt=(
+-                f"Cliente ({contact_name}) no WhatsApp"
+-                + (" [POR ÁUDIO DE VOZ]" if was_audio else (" [ENVIOU FOTO/TABELA]" if was_image else ""))
+-                + f": '{message}'"
+-            ),
+-            operation_label=f"Closer WhatsApp Autónomo ({contact_name})",
+-            strategy="MARGIN_OPTIMIZED",
+-            local_fallback_text=(
+-                (
+-                    f"📊 *Diagnóstico Rápido — {clean_cname}:* Hoje sua nota de velocidade no WhatsApp é *6.8/10* (clientes à noite ou no pico acabam indo pro concorrente). "
+-                    f"Com o *{ven_name}* sua empresa sobe para *10/10*: nossa IA atende 24h, agenda e cobra no Pix sozinha!\n\n"
+-                    f"👉 Veja o painel que já montei com o nome da sua empresa: {pub_url}\n\n"
+-                    f"Escolha como prefere ativar:\n"
+-                    f"1️⃣ *Teste 15 dias Self-Service:* R$ 49,90 no Pix (responda *QUERO TESTAR*)\n"
+-                    f"2️⃣ *Setup VIP Chave na Mão (entregamos pronto hoje):* R$ 197 no Pix (responda *SETUP VIP*)"
+-                )
+-                if first_warm_reply and not pix_block
+-                else (
+-                    f"Show, {clean_cname}! Com o *{ven_name}* sua empresa atende e fecha vendas 24h pelo WhatsApp ({pub_url})."
+-                    + (
+-                        ""
+-                        if pix_block
+-                        else " Prefere o Teste de 15 dias por *R$ 49,90* (*QUERO TESTAR*) ou entregarmos 100% configurado hoje por *R$ 197* (*SETUP VIP*)?"
+-                    )
+-                )
+-            ),
+-        )
+-
+-        final_reply = llm_reply.content.strip() + pix_block
+-
+-        interaction = OmnichannelInteraction(
+-            id=f"omni-{uuid.uuid4().hex[:10]}",
+-            channel="WHATSAPP_REAL_AUTO",
+-            department="SALES",
+-            contact_name=contact_name[:80],
+-            contact_handle=phone,
+-            inbound_message=(
+-                f"[🎙️ Áudio]: {message}"
+-                if was_audio
+-                else (f"[📸 Foto]: {message}" if was_image else message)
+-            )[:1000],
+-            agent_response=final_reply[:1800],
+-            sentiment="BUYING_INTENT" if (wants_to_buy or has_price_objection or wants_vip_197) else "QUESTION",
+-            deal_stage=deal_stage,
+-            deal_value_usd=round(billed_usd, 2) if pix_block else 0.0,
+-        )
+-        db.add(interaction)
+-        await db.commit()
+-
+-        await event_bus.publish(
+-            event_type="AUTO_WHATSAPP_CLOSER_REPLY",
+-            agent_slug="sales-closer",
+-            level="SUCCESS",
+-            message=(
+-                f"🤖💬 [Closer IA] Cliente '{contact_name}' respondeu ('{message[:45]}') -> "
+-                + ("Pix Asaas enviado automaticamente no WhatsApp!" if pix_block else "Dúvida respondida sozinha no WhatsApp!")
+-            ),
+-        )
+-
+-        if pix_block:
+-            brl_sent = (
+-                "197,00 (Setup VIP Chave na Mão)"
+-                if wants_vip_197
+-                else ("49,90 (Promo 15 dias)" if has_price_objection else f"{price_brl}/mês")
+-            )
+-            await EvolutionWhatsAppManager.notify_owner_vip(
+-                f"🔔 *[ALERTA VIP • CLIENTE PEDIU PIX!]*\n\n"
+-                f"🏪 *Cliente:* {contact_name} (+{phone})\n"
+-                f"📦 *Sistema:* {ven_name}\n"
+-                f"💳 *Cobrança enviada:* R$ {brl_sent}\n"
+-                f"💬 *Mensagem dele:* \"{message[:120]}\"\n\n"
+-                f"🤖 Seu Agente Closer já enviou o Pix Copia e Cola na conversa!"
+-            )
+-
+-        return final_reply
+-
+     @classmethod
+     async def run_abandoned_pix_and_ghost_recovery(cls, db: AsyncSession) -> dict:
+-        """
+-        Recuperador Automático Anti-Vácuo & Pix Pendente (1 único follow-up humano por contato):
+-          - Caso A: Cliente pediu Pix há +35 min (e <24h) e ainda não liquidou;
+-          - Caso B: Cliente respondeu há +3h (e <36h), tirou dúvida, mas sumiu antes de pedir Pix.
+-        """
+-        wa_state = await EvolutionWhatsAppManager.get_status(db)
+-        if wa_state.get("status") != "CONNECTED":
+-            return {"ok": False, "recovered": 0, "reason": "WHATSAPP_NOT_CONNECTED"}
+-
+-        now_utc = datetime.now(timezone.utc)
+-        rows = (
+-            await db.execute(
+-                select(OmnichannelInteraction)
+-                .where(OmnichannelInteraction.channel == "WHATSAPP_REAL_AUTO")
+-                .order_by(desc(OmnichannelInteraction.created_at))
+-                .limit(250)
+-            )
+-        ).scalars().all()
+-
+-        paid_names = set(
+-            (
+-                await db.execute(
+-                    select(PaymentInvoice.client_name).where(PaymentInvoice.status == "PAID")
+-                )
+-            ).scalars().all()
+-        )
+-
+-        by_phone: dict[str, list[OmnichannelInteraction]] = {}
+-        for r in rows:
+-            ph = "".join(ch for ch in (r.contact_handle or "") if ch.isdigit())
+-            if len(ph) >= 10:
+-                by_phone.setdefault(ph, []).append(r)
+-
+-        recovered_count = 0
+-        for phone, history in by_phone.items():
+-            if recovered_count >= 2:
+-                break
+-            stages = {h.deal_stage for h in history}
+-            if "FOLLOWUP_PIX_RECOVERY" in stages or "FOLLOWUP_GHOST_RECOVERY" in stages:
+-                continue
+-
+-            latest = history[0]
+-            cname = latest.contact_name or "parceiro(a)"
+-            if cname in paid_names:
+-                continue
+-
+-            created = latest.created_at
+-            if created.tzinfo is None:
+-                created = created.replace(tzinfo=timezone.utc)
+-            age = now_utc - created
+-
+-            # Caso A: Pix enviado há 35min..24h sem pagamento confirmado
+-            if latest.deal_stage in ("PIX_SENT_AUTO", "PIX_PROMO_49_SENT") and timedelta(minutes=35) <= age <= timedelta(hours=24):
+-                msg = (
+-                    f"Oi, {cname}! Tudo certinho por aí? 😊 Vi aqui no sistema que a sua ativação via Pix ainda ficou pendente. "
+-                    f"Conseguiu copiar o código Copia e Cola direitinho ou quer que eu te ajude a liberar seu acesso agora?"
+-                )
+-                send_res = await EvolutionWhatsAppManager.send_real_whatsapp(phone, msg)
+-                if send_res.get("ok"):
+-                    db.add(
+-                        OmnichannelInteraction(
+-                            id=f"omni-{uuid.uuid4().hex[:10]}",
+-                            channel="WHATSAPP_REAL_AUTO",
+-                            department="SALES",
+-                            contact_name=cname[:80],
+-                            contact_handle=phone,
+-                            inbound_message="[Follow-up Automático 35min — Pix Pendente]",
+-                            agent_response=msg,
+-                            sentiment="HIGH_INTENT",
+-                            deal_stage="FOLLOWUP_PIX_RECOVERY",
+-                            deal_value_usd=latest.deal_value_usd or 0.0,
+-                        )
+-                    )
+-                    await db.commit()
+-                    recovered_count += 1
+-                    await asyncio.sleep(4)
+-                continue
+-
+-            # Caso B: Cliente respondeu, entrou em negociação, mas deu vácuo há 3h..36h
+-            if latest.deal_stage == "IN_NEGOTIATION" and timedelta(hours=3) <= age <= timedelta(hours=36):
+-                msg = (
+-                    f"Oi, {cname}! Sei que a correria aí na empresa é grande! "
+-                    f"Se quiser ver na prática como o nosso robô atende e agenda seus clientes 24h no WhatsApp, "
+-                    f"consigo liberar hoje nossa ativação promocional de 15 dias por apenas *R$ 49,90 no Pix* (sem fidelidade). "
+-                    f"Quer que eu gere o seu teste agora?"
+-                )
+-                send_res = await EvolutionWhatsAppManager.send_real_whatsapp(phone, msg)
+-                if send_res.get("ok"):
+-                    db.add(
+-                        OmnichannelInteraction(
+-                            id=f"omni-{uuid.uuid4().hex[:10]}",
+-                            channel="WHATSAPP_REAL_AUTO",
+-                            department="SALES",
+-                            contact_name=cname[:80],
+-                            contact_handle=phone,
+-                            inbound_message="[Follow-up Automático 3h — Recuperação de Vácuo]",
+-                            agent_response=msg,
+-                            sentiment="FOLLOW_UP",
+-                            deal_stage="FOLLOWUP_GHOST_RECOVERY",
+-                            deal_value_usd=8.83,
+-                        )
+-                    )
+-                    await db.commit()
+-                    recovered_count += 1
+-                    await asyncio.sleep(4)
+-
+-        if recovered_count > 0:
+-            await event_bus.publish(
+-                event_type="ABANDONED_PIX_RECOVERY_RUN",
+-                agent_slug="sales-closer",
+-                level="SUCCESS",
+-                message=f"♻️ [Recuperador Anti-Vácuo] {recovered_count} follow-up(s) enviados automaticamente no WhatsApp!",
+-            )
+-        return {"ok": True, "recovered": recovered_count}
+-
++        # Follow-up automático desligado para não repetir mensagens ou cobrar
++        # alguém sem confirmar consentimento e status do pagamento no provedor.
++        return {"ok": False, "recovered": 0, "reason": "FOLLOWUP_DISABLED"}
+diff --git a/packages/leads/conversation_policy.py b/packages/leads/conversation_policy.py
+new file mode 100644
+index 0000000..9192e50
+--- /dev/null
++++ b/packages/leads/conversation_policy.py
+@@ -0,0 +1,160 @@
++"""Modo conservador de atendimento: respostas breves e sem prospecção ativa.
++
++A reserva do ID acontece antes da resposta. Isso prioriza não duplicar: se o
++processo cair após a reserva, a resposta pode não ser enviada. Identificações
++@lid sem associação confiável a um número não são tratadas automaticamente.
++"""
++import hashlib
++import re
++import unicodedata
++import uuid
++from datetime import datetime, timedelta, timezone
++
++from sqlalchemy import select, update
++from sqlalchemy.exc import IntegrityError
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from packages.database.models import OmnichannelInteraction, WhatsAppContactPreference, WhatsAppHandoffWindow, WhatsAppInboundClaim, WhatsAppReplyDelivery, WhatsAppReplyWindow
++
++
++def canonical_phone_jid(jid: str) -> str | None:
++    jid = (jid or '').strip().lower()
++    if not (jid.endswith('@s.whatsapp.net') or jid.endswith('@c.us')):
++        return None
++    phone = jid.split('@', 1)[0].split(':', 1)[0]
++    if not phone.isascii() or not phone.isdigit() or not 12 <= len(phone) <= 15:
++        return None
++    # Brasil: celular antigo de oito dígitos, quando o prefixo móvel é inequívoco.
++    if phone.startswith('55') and len(phone) == 12 and phone[4] in '6789':
++        phone = phone[:4] + '9' + phone[4:]
++    return phone
++
++
++def message_hash_for(phone_jid: str, message_id: str) -> str | None:
++    contact = canonical_phone_jid(phone_jid)
++    if not contact or not isinstance(message_id, str) or not 1 <= len(message_id) <= 128 or any(ord(c) < 32 for c in message_id):
++        return None
++    return hashlib.sha256(f'{contact}|{message_id}'.encode()).hexdigest()
++
++
++def normalize_text(text: str) -> str:
++    text = unicodedata.normalize('NFKD', (text or '').lower())
++    return ''.join(c for c in text if not unicodedata.combining(c)).strip()
++
++
++def asks_to_stop(text: str) -> bool:
++    s = normalize_text(text)
++    simple = re.sub(r'[^a-z0-9 ]', '', s).strip()
++    if simple in {'pare', 'parar', 'sair', 'cancelar', 'descadastrar', 'nao quero', 'nao tenho interesse'}:
++        return True
++    return bool(re.search(r'\b(nao (me )?(mande|envie|chame|contate|ligue)|nao quero receber|pare de (me )?(mandar|enviar)|remova? (meu numero|meu contato))\b', s))
++
++
++def choose_reply(message: str, *, first: bool, image: bool = False, audio: bool = False) -> str:
++    """Respostas fixas; não chama IA nem promete resultados ou recebimento."""
++    if image:
++        return 'Recebi sua imagem. Se for um comprovante, o pagamento precisa ser confirmado pela equipe no Asaas.'
++    if audio:
++        return 'Recebi seu áudio. Pode me contar por escrito como posso ajudar?'
++    s = normalize_text(message)
++    if re.search(r'\b(obrigad[oa]|valeu|agradeco)\b', s):
++        return 'Por nada! Se precisar, estou à disposição.'
++    if re.search(r'\b(pix|pagar|pagamento|cobranca|comprovante)\b', s):
++        return 'Posso ajudar com sua dúvida sobre pagamento. A equipe precisa confirmar os dados antes de qualquer cobrança.'
++    if re.search(r'\b(preco|valor|custa|quanto|planos?)\b', s):
++        return 'O teste foi anunciado por R$ 49,90 para 15 dias. Nossa equipe pode confirmar as condições e a disponibilidade.'
++    if re.search(r'\b(demo|demonstracao|testar|teste|funciona)\b', s):
++        return 'Posso explicar a proposta. Qual é o tipo do seu negócio e o que você precisa no WhatsApp?'
++    if first:
++        return 'Olá! Sou o assistente virtual da equipe. Como posso ajudar?'
++    return 'Entendi. Qual informação você precisa?'
++
++
++async def reserve_handoff(db: AsyncSession, contact: str) -> bool:
++    """Reserva atômica, no máximo um comando ⚡ por contato a cada 24h."""
++    now = datetime.now(timezone.utc)
++    db.add(WhatsAppHandoffWindow(contact_key=contact, last_sent_at=now))
++    try:
++        await db.commit()
++        return True
++    except IntegrityError:
++        await db.rollback()
++    result = await db.execute(update(WhatsAppHandoffWindow)
++        .where(WhatsAppHandoffWindow.contact_key == contact,
++               WhatsAppHandoffWindow.last_sent_at <= now - timedelta(hours=24))
++        .values(last_sent_at=now))
++    await db.commit()
++    return result.rowcount == 1
++
++
++async def reserve_reply(db: AsyncSession, contact: str) -> bool:
++    """Uma resposta automática por contato em 60 segundos; não agenda reenvio."""
++    now = datetime.now(timezone.utc)
++    db.add(WhatsAppReplyWindow(contact_key=contact, last_reserved_at=now))
++    try:
++        await db.commit()
++        return True
++    except IntegrityError:
++        await db.rollback()
++    result = await db.execute(update(WhatsAppReplyWindow)
++        .where(WhatsAppReplyWindow.contact_key == contact,
++               WhatsAppReplyWindow.last_reserved_at <= now - timedelta(seconds=60))
++        .values(last_reserved_at=now))
++    await db.commit()
++    return result.rowcount == 1
++
++
++async def handle_inbound(db: AsyncSession, *, message_id: str, phone_jid: str, message: str,
++                         name: str, audio: bool = False, image: bool = False, handoff: bool = False) -> dict:
++    """Reserva uma única vez e retorna texto. Não realiza envio direto ao WhatsApp."""
++    contact = canonical_phone_jid(phone_jid)
++    if not contact:
++        return {'reply': '', 'reason': 'UNRESOLVED_CONTACT'}
++    if not isinstance(message_id, str) or not 1 <= len(message_id) <= 128 or any(ord(c) < 32 for c in message_id):
++        return {'reply': '', 'reason': 'MISSING_MESSAGE_ID'}
++    # A chave do evento inclui a identidade estável do número, não somente o @lid.
++    event_key = message_hash_for(phone_jid, message_id)
++    db.add(WhatsAppInboundClaim(message_hash=event_key, contact_key=contact))
++    try:
++        await db.commit()
++    except IntegrityError:
++        await db.rollback()
++        if await db.get(WhatsAppInboundClaim, event_key):
++            return {'reply': '', 'reason': 'DUPLICATE_EVENT'}
++        raise
++    preference = await db.get(WhatsAppContactPreference, contact)
++    stop = not handoff and asks_to_stop(message)
++    if preference:
++        return {'reply': '', 'reason': 'OPTED_OUT'}
++    if handoff and not await reserve_handoff(db, contact):
++        return {'reply': '', 'reason': 'HANDOFF_RATE_LIMIT'}
++    if not stop and not await reserve_reply(db, contact):
++        db.add(OmnichannelInteraction(
++            id=f'omni-{uuid.uuid4().hex[:10]}', channel='WHATSAPP_REAL_AUTO', department='SALES',
++            contact_name=(name or 'Cliente')[:80], contact_handle=contact,
++            inbound_message='[imagem recebida]' if image else ('[áudio recebido]' if audio else message[:1000]),
++            agent_response='', sentiment='NEEDS_REVIEW', deal_stage='WAIT_HUMAN_REVIEW', deal_value_usd=0.0,
++        ))
++        await db.commit()
++        return {'reply': '', 'reason': 'REPLY_COOLDOWN'}
++    if stop:
++        db.add(WhatsAppContactPreference(contact_key=contact, opted_out_at=datetime.now(timezone.utc)))
++        reply = 'Entendido. Não enviaremos mais mensagens automáticas para você.'
++        stage = 'OPT_OUT'
++    else:
++        previous = (await db.execute(select(OmnichannelInteraction.id).where(
++            OmnichannelInteraction.channel == 'WHATSAPP_REAL_AUTO',
++            OmnichannelInteraction.contact_handle == contact,
++        ).limit(1))).first()
++        reply = choose_reply(message, first=not bool(previous), image=image, audio=audio)
++        stage = 'IN_NEGOTIATION'
++    interaction_id = f'omni-{uuid.uuid4().hex[:10]}'
++    db.add(OmnichannelInteraction(
++        id=interaction_id, channel='WHATSAPP_REAL_AUTO', department='SALES',
++        contact_name=(name or 'Cliente')[:80], contact_handle=contact,
++        inbound_message='[imagem recebida]' if image else ('[áudio recebido]' if audio else message[:1000]),
++        agent_response=reply, sentiment='OPT_OUT' if stop else 'QUESTION', deal_stage=stage, deal_value_usd=0.0,
++    ))
++    db.add(WhatsAppReplyDelivery(message_hash=event_key, interaction_id=interaction_id, status='PREPARED'))
++    await db.commit()
++    return {'reply': reply, 'reason': 'REPLY_PREPARED'}
+diff --git a/packages/payments/asaas_sandbox_inbox.py b/packages/payments/asaas_sandbox_inbox.py
+new file mode 100644
+index 0000000..3b2eb20
+--- /dev/null
++++ b/packages/payments/asaas_sandbox_inbox.py
+@@ -0,0 +1,109 @@
++"""Fila Asaas restrita a sandbox. Não libera produtos nem liquida faturas.
++
++Persistir antes de responder e validar cobranças separadamente. Para uso em
++produção faltam reconciliação transacional, liberação e testes com provedor.
++"""
++import os
++import re
++from datetime import datetime, timezone
++from decimal import Decimal
++from types import SimpleNamespace
++
++import httpx
++from sqlalchemy import select
++from sqlalchemy.exc import IntegrityError
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from packages.database.models import AsaasWebhookInbox, PaymentInvoice, PixInvoiceExpectation
++from packages.llm_router.vault import ConfigVault
++from packages.payments.asaas_validation import verify_static_pix
++
++SANDBOX_BASE = 'https://api-sandbox.asaas.com/v3'
++SAFE_ID = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
++
++
++def sandbox_enabled() -> bool:
++    return (os.getenv('ASAAS_SANDBOX_INBOX_ENABLED', '').lower() == 'true'
++            and os.getenv('ASAAS_BASE_URL', '').rstrip('/') == SANDBOX_BASE)
++
++
++def normalize_event(body: object) -> tuple[str, str, str | None]:
++    if not isinstance(body, dict):
++        raise ValueError('Evento inválido')
++    event_id, event_type = body.get('id'), body.get('event')
++    if not isinstance(event_id, str) or not SAFE_ID.fullmatch(event_id):
++        raise ValueError('Identificador de evento inválido')
++    if not isinstance(event_type, str) or not SAFE_ID.fullmatch(event_type) or len(event_type) > 96:
++        raise ValueError('Tipo de evento inválido')
++    payment = body.get('payment')
++    if payment is None:
++        payment_id = None
++    elif isinstance(payment, dict):
++        payment_id = payment.get('id')
++        if not isinstance(payment_id, str) or not SAFE_ID.fullmatch(payment_id):
++            raise ValueError('Identificador de pagamento inválido')
++    else:
++        raise ValueError('Pagamento inválido')
++    if event_type == 'PAYMENT_RECEIVED' and not payment_id:
++        raise ValueError('Pagamento ausente')
++    return event_id, event_type, payment_id
++
++
++async def record_event(db: AsyncSession, body: object) -> bool:
++    """True se criado, False para reentrega idêntica; não processa pagamento."""
++    event_id, event_type, payment_id = normalize_event(body)
++    db.add(AsaasWebhookInbox(event_id=event_id, event_type=event_type, payment_id=payment_id, status='PENDING_REVIEW'))
++    try:
++        await db.commit()
++        return True
++    except IntegrityError:
++        await db.rollback()
++        existing = await db.get(AsaasWebhookInbox, event_id)
++        if not existing or existing.event_type != event_type or existing.payment_id != payment_id:
++            raise ValueError('Conflito de identificador de evento')
++        return False
++
++
++async def verify_received_event(db: AsyncSession, event_id: str) -> dict:
++    """Consulta cobrança no Sandbox Asaas e registra conferência sem liquidar."""
++    if not sandbox_enabled():
++        raise RuntimeError('Somente sandbox')
++    if not SAFE_ID.fullmatch(event_id):
++        raise ValueError('Evento inválido')
++    event = await db.get(AsaasWebhookInbox, event_id)
++    if not event:
++        raise LookupError('Evento não encontrado')
++    if event.event_type != 'PAYMENT_RECEIVED' or not event.payment_id:
++        return {'status': event.status, 'reason': 'evento_nao_recebido'}
++    api_key = await ConfigVault.get_secret(db, 'ASAAS_API_KEY')
++    if not api_key:
++        raise RuntimeError('Chave Sandbox não configurada')
++    try:
++        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
++            response = await client.get(f'{SANDBOX_BASE}/payments/{event.payment_id}', headers={'access_token': api_key})
++            response.raise_for_status()
++            payment = response.json()
++        if not isinstance(payment, dict):
++            raise ValueError('Resposta inválida')
++    except (httpx.HTTPError, ValueError) as exc:
++        raise RuntimeError('Consulta ao Sandbox indisponível') from exc
++    qr_id = payment.get('pixQrCodeId')
++    rows = (await db.execute(select(PaymentInvoice, PixInvoiceExpectation)
++        .join(PixInvoiceExpectation, PixInvoiceExpectation.invoice_id == PaymentInvoice.id)
++        .where(PaymentInvoice.provider == 'ASAAS_PIX', PaymentInvoice.external_id == qr_id))).all()
++    invoice_id = None
++    if len(rows) != 1:
++        verified, reason = False, 'qr_sem_fatura_unica_ou_legado'
++    else:
++        invoice, expectation = rows[0]
++        candidate = SimpleNamespace(external_id=invoice.external_id, expected_amount_brl=Decimal(expectation.amount_brl_cents)/100)
++        webhook = {'id': event.event_id, 'event': event.event_type, 'payment': {'id': event.payment_id}}
++        verified, reason = verify_static_pix(webhook, payment, candidate)
++        if verified:
++            invoice_id = invoice.id
++    event.status = 'VERIFIED_NOT_SETTLED' if verified else 'NEEDS_REVIEW'
++    event.verification_reason = reason
++    event.invoice_id = invoice_id
++    event.verified_at = datetime.now(timezone.utc)
++    await db.commit()
++    return {'status': event.status, 'reason': reason, 'invoice_id': invoice_id}
+diff --git a/packages/payments/asaas_validation.py b/packages/payments/asaas_validation.py
+new file mode 100644
+index 0000000..506c1e0
+--- /dev/null
++++ b/packages/payments/asaas_validation.py
+@@ -0,0 +1,57 @@
++"""Validação preliminar de Pix estático. Não altera o banco nem liquida pagamentos.
++
++Um chamador deve buscar a cobrança por HTTPS diretamente no Asaas, com a API key
++privada, após autenticar o webhook; payloads recebidos não são prova suficiente.
++Não está conectado à produção nem substitui deduplicação transacional e outbox.
++"""
++from decimal import Decimal, InvalidOperation
++import hmac
++
++
++def valid_webhook_token(expected: str, received: str) -> bool:
++    """Nunca aceita token vazio; não é permitido usar API key como token."""
++    if not isinstance(expected, str) or not isinstance(received, str):
++        return False
++    if not expected or not received:
++        return False
++    return hmac.compare_digest(expected.encode('utf-8'), received.encode('utf-8'))
++
++
++def verify_static_pix(event: dict, provider_payment: dict, invoice) -> tuple[bool, str]:
++    """Verifica identidade e valor de uma fatura nova usando dados do provedor.
++
++    Requer invoice.expected_amount_brl como decimal exato e invoice.external_id
++    persistido a partir do ID REAL do QR Asaas. O modelo atual não possui essa
++    coluna: migração e teste de pagamentos legados são necessários antes do uso.
++    """
++    if not isinstance(event, dict) or not isinstance(provider_payment, dict):
++        return False, 'formato_invalido'
++    message_payment = event.get('payment')
++    if not isinstance(message_payment, dict):
++        return False, 'pagamento_ausente'
++    event_id = event.get('id')
++    payment_id = message_payment.get('id')
++    if not isinstance(event_id, str) or not event_id or not isinstance(payment_id, str) or not payment_id:
++        return False, 'identificadores_ausentes'
++    if event.get('event') != 'PAYMENT_RECEIVED':
++        return False, 'evento_nao_recebido'
++    if provider_payment.get('id') != payment_id:
++        return False, 'id_pagamento_divergente'
++    if provider_payment.get('status') != 'RECEIVED' or provider_payment.get('billingType') != 'PIX':
++        return False, 'status_ou_tipo_invalido'
++    qr_id = getattr(invoice, 'external_id', None)
++    if not isinstance(qr_id, str) or not qr_id or qr_id.startswith('ext_'):
++        return False, 'qr_invalido'
++    if provider_payment.get('pixQrCodeId') != qr_id:
++        return False, 'qr_divergente'
++    expected = getattr(invoice, 'expected_amount_brl', None)
++    if expected is None:
++        return False, 'valor_exato_indisponivel'
++    try:
++        amount = Decimal(str(provider_payment.get('value')))
++        target = Decimal(str(expected))
++        if not amount.is_finite() or not target.is_finite() or amount <= 0 or target <= 0 or amount != target:
++            return False, 'valor_divergente'
++    except (InvalidOperation, ValueError, TypeError):
++        return False, 'valor_invalido'
++    return True, 'verificado_nao_liquidado'
+diff --git a/packages/payments/gateways.py b/packages/payments/gateways.py
+index 428c4e3..c34f453 100644
+--- a/packages/payments/gateways.py
++++ b/packages/payments/gateways.py
+@@ -1,14 +1,17 @@
++import base64
++import binascii
+ import hashlib
+ import os
+ import uuid
+ from datetime import datetime, timezone
++from decimal import Decimal, ROUND_HALF_UP
+ import httpx
+ from sqlalchemy import or_, select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from packages.agents.llm_interceptor import FinancialLedgerInterceptor
+ from packages.database.event_bus import event_bus
+-from packages.database.models import PaymentInvoice
++from packages.database.models import PaymentInvoice, PixInvoiceExpectation
+ from packages.llm_router.vault import ConfigVault
+ 
+ 
+@@ -60,6 +63,10 @@ def generate_matrix_qr_svg(payload_text: str, accent_color: str = "#10b981") ->
+     )
+ 
+ 
++class PaymentGatewayUnavailable(Exception):
++    """Não foi possível criar uma cobrança real no provedor."""
++
++
+ class PaymentGatewayManager:
+     """
+     Conector Financeiro de Produção:
+@@ -80,10 +87,16 @@ class PaymentGatewayManager:
+     ) -> PaymentInvoice:
+         inv_id = f"inv-{uuid.uuid4().hex[:8]}"
+         provider_clean = provider.upper()
++        # Enquanto a reconciliação segura está em homologação, esta branch
++        # não cria cobranças reais, inclusive pelo painel administrativo.
++        from packages.payments.asaas_sandbox_inbox import sandbox_enabled
++        if provider_clean != 'ASAAS_PIX' or not sandbox_enabled():
++            raise PaymentGatewayUnavailable('Cobranças disponíveis apenas no Sandbox Asaas de teste.')
+         checkout_url: str | None = None
+         pix_copy_paste: str | None = None
+         pix_qr_svg: str | None = None
+         external_id = f"ext_{uuid.uuid4().hex[:12]}"
++        amount_brl_cents: int | None = None
+ 
+         if provider_clean == "STRIPE":
+             stripe_key = await ConfigVault.get_secret(db, "STRIPE_SECRET_KEY")
+@@ -113,7 +126,7 @@ class PaymentGatewayManager:
+                     pass
+ 
+             if not checkout_url:
+-                checkout_url = f"https://checkout.stripe.com/c/pay/cs_empire_{inv_id}"
++                raise PaymentGatewayUnavailable("Não foi possível criar checkout Stripe real.")
+ 
+         else:  # ASAAS_PIX (Produção Real Banco Central)
+             asaas_key = await ConfigVault.get_secret(db, "ASAAS_API_KEY")
+@@ -149,7 +162,9 @@ class PaymentGatewayManager:
+ 
+                         # 2. Gera QR Code Pix oficial escaneável em Reais (BRL)
+                         if address_key:
+-                            brl_value = max(round(amount_usd * 5.65, 2), 1.0)
++                            brl_amount = max((Decimal(str(amount_usd)) * Decimal('5.65')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), Decimal('1.00'))
++                            brl_value = float(brl_amount)
++                            amount_brl_cents = int(brl_amount * 100)
+                             clean_desc = (description or "NexusFlow AI").strip()[:35]
+                             qr_resp = await client.post(
+                                 f"{asaas_base}/pix/qrCodes/static",
+@@ -159,6 +174,7 @@ class PaymentGatewayManager:
+                                     "description": clean_desc,
+                                     "value": brl_value,
+                                     "format": "ALL",
++                                    "allowsMultiplePayments": False,
+                                     "externalReference": inv_id,
+                                 },
+                             )
+@@ -167,23 +183,27 @@ class PaymentGatewayManager:
+                                 external_id = qdata.get("id", external_id)
+                                 pix_copy_paste = qdata.get("payload")
+                                 encoded_img = qdata.get("encodedImage")
+-                                if encoded_img:
+-                                    pix_qr_svg = (
+-                                        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">'
+-                                        '<rect width="192" height="192" rx="12" fill="#ffffff"/>'
+-                                        f'<image href="data:image/png;base64,{encoded_img}" x="8" y="8" width="176" height="176"/>'
+-                                        "</svg>"
+-                                    )
++                                if isinstance(encoded_img, str) and len(encoded_img) <= 1_000_000:
++                                    try:
++                                        raw = base64.b64decode(encoded_img, validate=True)
++                                    except (ValueError, binascii.Error):
++                                        raw = b''
++                                    if raw.startswith(b'\x89PNG\r\n\x1a\n'):
++                                        safe_image = base64.b64encode(raw).decode('ascii')
++                                        pix_qr_svg = (
++                                            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">'
++                                            '<rect width="192" height="192" rx="12" fill="#ffffff"/>'
++                                            f'<image href="data:image/png;base64,{safe_image}" x="8" y="8" width="176" height="176"/>'
++                                            "</svg>"
++                                        )
+                 except Exception:
+                     pass
+ 
+-            if not pix_copy_paste:
+-                pix_copy_paste = (
+-                    f"00020126580014BR.GOV.BCB.PIX0136empire-treasury-{inv_id}"
+-                    f"5204000053039865407{amount_usd:.2f}5802BR5917AUTONOMOUS EMPIRE6009SAO PAULO62070503***6304ABCD"
+-                )
+-            if not pix_qr_svg:
+-                pix_qr_svg = generate_matrix_qr_svg(pix_copy_paste, accent_color="#10b981")
++            if not pix_copy_paste or not isinstance(external_id, str) or not external_id or external_id.startswith('ext_') or amount_brl_cents is None:
++                # Nunca apresentar um payload sintético ou QR sem ID conciliável.
++                raise PaymentGatewayUnavailable("Não foi possível criar Pix real no Asaas.")
++            # Sem imagem do provedor, ofereça apenas o código copia e cola.
++            # generate_matrix_qr_svg não é um codificador QR válido.
+ 
+         invoice = PaymentInvoice(
+             id=inv_id,
+@@ -192,13 +212,17 @@ class PaymentGatewayManager:
+             client_name=client_name,
+             client_email=client_email,
+             description=description,
+-            amount_usd=round(amount_usd, 2),
++            # Preserve a precisão usada na conversão para BRL; registros antigos
++            # arredondados a dois decimais ainda exigem revisão individual.
++            amount_usd=round(amount_usd, 4),
+             status="PENDING",
+             checkout_url=checkout_url,
+             pix_copy_paste=pix_copy_paste,
+             pix_qr_svg=pix_qr_svg,
+         )
+         db.add(invoice)
++        if provider_clean == 'ASAAS_PIX' and amount_brl_cents is not None:
++            db.add(PixInvoiceExpectation(invoice_id=inv_id, amount_brl_cents=amount_brl_cents))
+         await db.commit()
+ 
+         await event_bus.publish(
+diff --git a/packages/security/auth_guard.py b/packages/security/auth_guard.py
+index d286f2e..ce97286 100644
+--- a/packages/security/auth_guard.py
++++ b/packages/security/auth_guard.py
+@@ -64,7 +64,7 @@ class SovereignSecurityGuard:
+         return False
+ 
+     @classmethod
+-    def issue_jwt(cls, subject: str = "CEO_SOVEREIGN", ttl_seconds: int = 86400) -> str:
++    def issue_jwt(cls, subject: str = "CEO_SOVEREIGN", ttl_seconds: int = 14400) -> str:
+         header = {"alg": "HS256", "typ": "JWT"}
+         now = int(time.time())
+         payload = {
+@@ -101,19 +101,10 @@ class SovereignSecurityGuard:
+ 
+     @classmethod
+     def get_security_overview(cls) -> dict:
+-        otpauth_uri = (
+-            f"otpauth://totp/AutonomousEmpire:CEO?secret={cls._totp_secret_b32}&issuer=AutonomousEmpire"
+-        )
+-        rem_secs = 30 - (int(time.time()) % 30)
++        # Nunca divulgar segredo 2FA, URI de provisionamento, código atual ou senha.
+         return {
+             "kill_switch_active": cls._kill_switch_active,
+             "require_2fa": cls._require_2fa,
+-            "totp_secret_b32": cls._totp_secret_b32,
+-            "otpauth_uri": otpauth_uri,
+-            "totp_qr_svg": generate_matrix_qr_svg(otpauth_uri, accent_color="#8b5cf6"),
+-            "current_totp_demo": cls.generate_totp(),
+-            "totp_seconds_remaining": rem_secs,
+-            "default_password_hint": "empire2026",
+         }
+ 
+     @classmethod
+diff --git a/packages/security/session_controls.py b/packages/security/session_controls.py
+new file mode 100644
+index 0000000..b57f699
+--- /dev/null
++++ b/packages/security/session_controls.py
+@@ -0,0 +1,54 @@
++"""Controles preliminares do painel. Devem ser homologados antes do deploy."""
++import base64
++import binascii
++import hashlib
++import hmac
++import os
++from urllib.parse import urlsplit
++
++from packages.security.auth_guard import SovereignSecurityGuard
++
++COOKIE_NAME = 'empire_admin'
++
++
++def secure_credentials_configured() -> bool:
++    password = os.environ.get('EMPIRE_CEO_PASSWORD', '')
++    jwt_secret = os.environ.get('EMPIRE_JWT_SECRET', '')
++    totp = os.environ.get('EMPIRE_TOTP_SECRET', '')
++    if len(password) < 16 or len(jwt_secret) < 32 or len(totp) < 32:
++        return False
++    if password == 'empire2026' or totp == 'JBSWY3DPEHPK3PXP':
++        return False
++    try:
++        if len(base64.b32decode(totp.upper(), casefold=True)) < 20:
++            return False
++    except (ValueError, binascii.Error):
++        return False
++    # Valores devem coincidir com os carregados no início do processo.
++    return (hmac.compare_digest(hashlib.sha256(password.encode()).hexdigest(), SovereignSecurityGuard._ceo_password_hash)
++            and hmac.compare_digest(jwt_secret, SovereignSecurityGuard._jwt_secret)
++            and hmac.compare_digest(totp, SovereignSecurityGuard._totp_secret_b32))
++
++
++def valid_session(token: str | None) -> bool:
++    if not secure_credentials_configured() or not token:
++        return False
++    claims = SovereignSecurityGuard.verify_jwt(token)
++    return bool(claims and claims.get('sub') == 'CEO_SOVEREIGN' and claims.get('role') == 'EMPIRE_OWNER')
++
++
++def valid_internal_secret(value: str | None) -> bool:
++    secret = os.getenv('WA_INTERNAL_SECRET', '')
++    return bool(len(secret) >= 32 and value and hmac.compare_digest(secret, value))
++
++
++def same_origin(origin: str | None, host: str | None) -> bool:
++    if not origin or not host:
++        return False
++    try:
++        parts = urlsplit(origin)
++        return (parts.scheme in ('http', 'https') and parts.netloc.lower() == host.lower()
++                and parts.path in ('', '/') and not parts.query and not parts.fragment
++                and '@' not in parts.netloc)
++    except ValueError:
++        return False
+diff --git a/render.yaml b/render.yaml
+index e6292c0..c9205d4 100644
+--- a/render.yaml
++++ b/render.yaml
+@@ -7,8 +7,8 @@ services:
+     healthCheckPath: /api/health
+     envVars:
+       - key: EMPIRE_CEO_PASSWORD
+-        value: empire2026
++        sync: false
+       - key: EMPIRE_JWT_SECRET
+         generateValue: true
+       - key: EMPIRE_TOTP_SECRET
+-        value: JBSWY3DPEHPK3PXP
++        sync: false
+diff --git a/tests/test_admin_security.py b/tests/test_admin_security.py
+new file mode 100644
+index 0000000..0e8e9c5
+--- /dev/null
++++ b/tests/test_admin_security.py
+@@ -0,0 +1,105 @@
++"""Homologação simulada; sem acesso a serviços externos."""
++import os
++import sys
++import unittest
++from pathlib import Path
++from unittest.mock import patch, AsyncMock
++import httpx
++ROOT = Path(__file__).resolve().parents[1]
++sys.path[:0] = [str(ROOT), str(ROOT / 'apps' / 'api-gateway')]
++os.environ['DATABASE_URL'] = 'sqlite+aiosqlite:///:memory:'
++import main
++from packages.security import session_controls
++
++
++class TestApiProtection(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='https://empire.test')
++    async def asyncTearDown(self):
++        await self.client.aclose()
++        main.app.dependency_overrides.clear()
++        main._LOGIN_ATTEMPTS.clear()
++    async def test_public_health_and_private_resources(self):
++        self.assertEqual((await self.client.get('/api/health')).status_code, 200)
++        for path in ['/api/dashboard/overview','/api/leads/campaign-status','/api/system/export-monorepo.zip','/api/factory/builds/foo']:
++            self.assertEqual((await self.client.get(path)).status_code, 401, path)
++        for path in ['/api/vault/secret','/api/leads/autopilot-toggle','/api/webhooks/payments/inv-1/settle','/api/onboarding/configure']:
++            self.assertEqual((await self.client.post(path, json={})).status_code, 401, path)
++    async def test_internal_secret_required_even_with_loopback(self):
++        with patch.dict(os.environ, {'WA_INTERNAL_SECRET': 'x'*64}):
++            self.assertEqual((await self.client.get('/api/internal/wa-auth-restore')).status_code, 403)
++            self.assertEqual((await self.client.post('/api/webhooks/wa-bridge-inbound',json={})).status_code, 403)
++            self.assertFalse(session_controls.valid_internal_secret('bad'))
++            self.assertTrue(session_controls.valid_internal_secret('x'*64))
++    async def test_missing_origin_rejected_before_login(self):
++        self.assertEqual((await self.client.post('/api/security/login',json={})).status_code, 403)
++        self.assertEqual((await self.client.post('/api/security/login',headers={'origin':'https://evil.test'},json={})).status_code, 403)
++    async def test_no_default_credentials(self):
++        with patch.dict(os.environ, {'EMPIRE_CEO_PASSWORD':'empire2026','EMPIRE_JWT_SECRET':'x'*40,'EMPIRE_TOTP_SECRET':'JBSWY3DPEHPK3PXP'}):
++            self.assertFalse(session_controls.secure_credentials_configured())
++            res=await self.client.post('/api/security/login',headers={'origin':'https://empire.test'},json={'password':'test','totp_code':'123456'})
++            self.assertEqual(res.status_code,503)
++    async def test_cookie_login_and_csrf(self):
++        async def fake_db():
++            yield object()
++        main.app.dependency_overrides[main.get_db] = fake_db
++        with patch('main.secure_credentials_configured',return_value=True), \
++             patch('main.valid_session',side_effect=lambda x: x=='secret-token'), \
++             patch.object(main.SovereignSecurityGuard,'authenticate_ceo',new=AsyncMock(return_value={'token':'secret-token','role':'EMPIRE_OWNER'})):
++            login=await self.client.post('/api/security/login',headers={'origin':'https://empire.test'},json={'password':'a','totp_code':'123456'})
++            self.assertEqual(login.status_code,200)
++            self.assertNotIn('token',login.json())
++            cookie=login.headers['set-cookie'].lower()
++            self.assertIn('httponly',cookie)
++            self.assertIn('secure',cookie)
++            self.assertIn('samesite=strict',cookie)
++            self.assertEqual((await self.client.post('/api/security/logout',headers={'origin':'https://evil.test'})).status_code,403)
++            self.assertEqual((await self.client.post('/api/security/logout',headers={'origin':'https://empire.test'})).status_code,200)
++            self.assertEqual((await self.client.post('/api/security/logout',headers={'origin':'https://empire.test'})).status_code,401)
++    async def test_real_totp_and_session_against_api(self):
++        import base64, hashlib
++        password='stage-only-password-not-production'
++        jwt='stage-jwt-secret-not-used-in-production-12345'
++        totp=base64.b32encode(b'testing-2fa-secret-20-bytes').decode()
++        async def fake_db():
++            yield object()
++        main.app.dependency_overrides[main.get_db] = fake_db
++        with patch.dict(os.environ, {'EMPIRE_CEO_PASSWORD':password,'EMPIRE_JWT_SECRET':jwt,'EMPIRE_TOTP_SECRET':totp}), \
++             patch.object(main.SovereignSecurityGuard,'_ceo_password_hash',hashlib.sha256(password.encode()).hexdigest()), \
++             patch.object(main.SovereignSecurityGuard,'_jwt_secret',jwt), \
++             patch.object(main.SovereignSecurityGuard,'_totp_secret_b32',totp), \
++             patch.object(main.SovereignSecurityGuard,'log_audit',new=AsyncMock()), \
++             patch('packages.security.auth_guard.event_bus.publish',new=AsyncMock()):
++            h={'origin':'https://empire.test'}
++            bad=await self.client.post('/api/security/login',headers=h,json={'password':password,'totp_code':'not-a-valid-code'})
++            self.assertEqual(bad.status_code,401)
++            good=await self.client.post('/api/security/login',headers=h,json={'password':password,'totp_code':main.SovereignSecurityGuard.generate_totp()})
++            self.assertEqual(good.status_code,200)
++            self.assertEqual((await self.client.get('/api/leads/campaign-status')).status_code,200)
++            self.assertEqual((await self.client.post('/api/security/logout',headers=h)).status_code,200)
++            self.assertEqual((await self.client.get('/api/leads/campaign-status')).status_code,401)
++    async def test_paid_webhook_is_not_processed(self):
++        async def fake_db():
++            yield object()
++        main.app.dependency_overrides[main.get_db] = fake_db
++        self.assertEqual((await self.client.post('/api/webhooks/asaas',json={'event':'PAYMENT_RECEIVED'})).status_code,503)
++
++
++class TestTelemetry(unittest.TestCase):
++    def test_websocket_requires_cookie_and_same_origin(self):
++        from fastapi.testclient import TestClient
++        from starlette.websockets import WebSocketDisconnect
++        client = TestClient(main.app, base_url='https://empire.test')
++        with patch('main.valid_session', side_effect=lambda value: value == 'valid'):
++            with self.assertRaises(WebSocketDisconnect):
++                with client.websocket_connect('wss://empire.test/ws/telemetry', headers={'origin':'https://empire.test'}):
++                    pass
++            with self.assertRaises(WebSocketDisconnect):
++                with client.websocket_connect('wss://empire.test/ws/telemetry', headers={'origin':'https://evil.test', 'cookie':'empire_admin=valid'}):
++                    pass
++            with client.websocket_connect('wss://empire.test/ws/telemetry', headers={'origin':'https://empire.test', 'cookie':'empire_admin=valid'}) as ws:
++                self.assertEqual(ws.receive_json()['type'], 'SNAPSHOT')
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_asaas_sandbox_inbox.py b/tests/test_asaas_sandbox_inbox.py
+new file mode 100644
+index 0000000..c76d1f8
+--- /dev/null
++++ b/tests/test_asaas_sandbox_inbox.py
+@@ -0,0 +1,147 @@
++"""Inbox sandbox testada em SQLite e respostas Asaas simuladas; sem rede."""
++import os
++import sys
++import unittest
++from pathlib import Path
++from unittest.mock import AsyncMock, patch
++
++import httpx
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path[:0] = [str(ROOT), str(ROOT / 'apps' / 'api-gateway')]
++os.environ['DATABASE_URL'] = 'sqlite+aiosqlite:///:memory:'
++import main
++from packages.database.models import Base, AsaasWebhookInbox, PaymentInvoice, PixInvoiceExpectation
++from packages.payments.asaas_sandbox_inbox import verify_received_event
++
++TOKEN='qwerty1234-sandbox-secret-ABCDE-6789abcdef'
++ENV={'ASAAS_SANDBOX_INBOX_ENABLED':'true','ASAAS_BASE_URL':'https://api-sandbox.asaas.com/v3','ASAAS_WEBHOOK_TOKEN':TOKEN}
++
++
++class TestSandboxInbox(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.engine=create_async_engine('sqlite+aiosqlite:///:memory:')
++        async with self.engine.begin() as conn:
++            await conn.run_sync(Base.metadata.create_all)
++        self.sessions=async_sessionmaker(self.engine,expire_on_commit=False)
++        async def fake_db():
++            async with self.sessions() as db:
++                yield db
++        main.app.dependency_overrides[main.get_db]=fake_db
++        self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),base_url='https://empire.test')
++        self.env=patch.dict(os.environ,ENV)
++        self.env.start()
++        self.vault=patch('main.ConfigVault.get_secret',new=AsyncMock(return_value='sandbox-api-key'))
++        self.vault.start()
++    async def asyncTearDown(self):
++        self.vault.stop(); self.env.stop()
++        main.app.dependency_overrides.clear()
++        await self.client.aclose(); await self.engine.dispose()
++    def headers(self):
++        return {'asaas-access-token':TOKEN}
++    def event(self):
++        return {'id':'evt_1','event':'PAYMENT_RECEIVED','payment':{'id':'pay_1','value':49.90}}
++    async def test_auth_and_exactly_once_recording(self):
++        self.assertEqual((await self.client.post('/api/webhooks/asaas',json=self.event())).status_code,401)
++        r=await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=self.event())
++        self.assertEqual(r.status_code,200); self.assertEqual(r.json(),{'ok':True,'recorded':True,'settled':False})
++        r=await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=self.event())
++        self.assertEqual(r.status_code,200); self.assertFalse(r.json()['recorded'])
++        async with self.sessions() as db:
++            events=(await db.execute(select(AsaasWebhookInbox))).scalars().all()
++            self.assertEqual(len(events),1); self.assertEqual(events[0].status,'PENDING_REVIEW')
++    async def test_duplicate_id_different_payment_rejected(self):
++        await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=self.event())
++        altered=self.event(); altered['payment']['id']='pay_other'
++        self.assertEqual((await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=altered)).status_code,400)
++    async def test_bad_event_and_big_body_rejected(self):
++        self.assertEqual((await self.client.post('/api/webhooks/asaas',headers=self.headers(),json={'id':'../../x','event':'PAYMENT_RECEIVED'})).status_code,400)
++        self.assertEqual((await self.client.post('/api/webhooks/asaas',headers=self.headers(),content=b'x'*65537)).status_code,413)
++    async def test_sandbox_only(self):
++        with patch.dict(os.environ,{'ASAAS_BASE_URL':'https://api.asaas.com/v3'}):
++            self.assertEqual((await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=self.event())).status_code,503)
++    async def test_automatic_check_is_admin_only_and_never_settles(self):
++        await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=self.event())
++        self.assertEqual((await self.client.get('/api/payments/asaas-inbox')).status_code,401)
++        self.assertEqual((await self.client.post('/api/payments/asaas-inbox/evt_1/verify')).status_code,401)
++        async with self.sessions() as db:
++            db.add(PaymentInvoice(id='inv-1',provider='ASAAS_PIX',external_id='qr-1',client_name='Teste',client_email='x@example.com',description='Teste',amount_usd=8.8319,status='PENDING'))
++            db.add(PixInvoiceExpectation(invoice_id='inv-1',amount_brl_cents=4990))
++            await db.commit()
++        class Resp:
++            def raise_for_status(self): pass
++            def json(self): return {'id':'pay_1','status':'RECEIVED','billingType':'PIX','pixQrCodeId':'qr-1','value':49.90}
++        class FakeRemote:
++            def __init__(self,*args,**kwargs): pass
++            async def __aenter__(self): return self
++            async def __aexit__(self,*args): pass
++            async def get(self,url,**kwargs): return Resp()
++        owner={'origin':'https://empire.test','cookie':'empire_admin=valid'}
++        with patch('main.valid_session',side_effect=lambda value: value=='valid'):
++            lst=await self.client.get('/api/payments/asaas-inbox',headers=owner)
++            self.assertTrue(lst.json()['sandbox_only'])
++            self.assertEqual(lst.json()['items'][0]['status'],'PENDING_REVIEW')
++            bad=await self.client.post('/api/payments/asaas-inbox/evt_1/verify',headers={'origin':'https://evil.test','cookie':'empire_admin=valid'})
++            self.assertEqual(bad.status_code,403)
++            with patch('packages.payments.asaas_sandbox_inbox.httpx.AsyncClient',FakeRemote):
++                ok=await self.client.post('/api/payments/asaas-inbox/evt_1/verify',headers=owner)
++            self.assertEqual(ok.json()['status'],'VERIFIED_NOT_SETTLED')
++            self.assertEqual((await self.client.get('/api/payments/asaas-inbox',headers=owner)).json()['items'][0]['status'],'VERIFIED_NOT_SETTLED')
++        async with self.sessions() as db:
++            self.assertEqual((await db.get(PaymentInvoice,'inv-1')).status,'PENDING')
++    async def test_real_invoice_creation_blocked_in_this_branch(self):
++        from packages.payments.gateways import PaymentGatewayManager, PaymentGatewayUnavailable
++        with patch.dict(os.environ,{'ASAAS_BASE_URL':'https://api.asaas.com/v3'}):
++            async with self.sessions() as db:
++                with self.assertRaises(PaymentGatewayUnavailable):
++                    await PaymentGatewayManager.create_invoice(db,'ASAAS_PIX','Teste','x@example.com','Teste',8.8319)
++                self.assertEqual((await db.execute(select(PaymentInvoice))).scalars().all(),[])
++    async def test_new_invoice_records_exact_cents_and_one_payment(self):
++        from packages.payments.gateways import PaymentGatewayManager
++        class Resp:
++            status_code=200
++            def __init__(self,body): self.body=body
++            def json(self): return self.body
++        class FakeRemote:
++            def __init__(self,*args,**kwargs): pass
++            async def __aenter__(self): return self
++            async def __aexit__(self,*args): pass
++            async def get(self,url,**kwargs):
++                return Resp({'data':[{'status':'ACTIVE','key':'sandbox-key'}]})
++            async def post(self,url,**kwargs):
++                self_test=kwargs['json']
++                assert self_test['value'] == 49.90
++                assert self_test['allowsMultiplePayments'] is False
++                return Resp({'id':'qr-test','payload':'sandbox-pix-payload'})
++        async with self.sessions() as db:
++            with patch('packages.payments.gateways.httpx.AsyncClient',FakeRemote), patch('packages.payments.gateways.event_bus.publish',new=AsyncMock()):
++                inv=await PaymentGatewayManager.create_invoice(db,'ASAAS_PIX','Teste','x@example.com','Teste',8.8319)
++            expected=await db.get(PixInvoiceExpectation,inv.id)
++            self.assertEqual(expected.amount_brl_cents,4990)
++            self.assertEqual(inv.status,'PENDING')
++    async def test_verified_never_marks_invoice_paid(self):
++        async with self.sessions() as db:
++            db.add(PaymentInvoice(id='inv-1',provider='ASAAS_PIX',external_id='qr-1',client_name='Teste',client_email='x@example.com',description='Teste',amount_usd=8.8319,status='PENDING'))
++            db.add(PixInvoiceExpectation(invoice_id='inv-1',amount_brl_cents=4990))
++            await db.commit()
++        await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=self.event())
++        class Resp:
++            def raise_for_status(self): pass
++            def json(self): return {'id':'pay_1','status':'RECEIVED','billingType':'PIX','pixQrCodeId':'qr-1','value':49.90}
++        class FakeRemote:
++            def __init__(self,*args,**kwargs): pass
++            async def __aenter__(self): return self
++            async def __aexit__(self,*args): pass
++            async def get(self,url,**kwargs):
++                assert url == 'https://api-sandbox.asaas.com/v3/payments/pay_1'
++                return Resp()
++        async with self.sessions() as db:
++            with patch('packages.payments.asaas_sandbox_inbox.httpx.AsyncClient',FakeRemote):
++                result=await verify_received_event(db,'evt_1')
++            self.assertEqual(result['status'],'VERIFIED_NOT_SETTLED')
++            self.assertEqual(result['invoice_id'],'inv-1')
++            self.assertEqual((await db.get(PaymentInvoice,'inv-1')).status,'PENDING')
++
++if __name__ == '__main__': unittest.main()
+diff --git a/tests/test_asaas_validation.py b/tests/test_asaas_validation.py
+new file mode 100644
+index 0000000..cf2a3b6
+--- /dev/null
++++ b/tests/test_asaas_validation.py
+@@ -0,0 +1,51 @@
++"""Validação offline; sem conexão ao Asaas, banco ou webhook real."""
++import unittest
++from decimal import Decimal
++from types import SimpleNamespace
++from packages.payments.asaas_validation import valid_webhook_token, verify_static_pix
++
++
++class VerifyAsaas(unittest.TestCase):
++    def setUp(self):
++        self.event = {'id':'evt_1','event':'PAYMENT_RECEIVED','payment':{'id':'pay_1'}}
++        self.payment = {'id':'pay_1','status':'RECEIVED','billingType':'PIX','pixQrCodeId':'real-qr-id','value':49.90}
++        self.invoice = SimpleNamespace(external_id='real-qr-id',expected_amount_brl=Decimal('49.90'))
++    def check(self):
++        return verify_static_pix(self.event, self.payment, self.invoice)[0]
++    def test_valid(self):
++        self.assertTrue(self.check())
++    def test_token(self):
++        self.assertFalse(valid_webhook_token('', ''))
++        self.assertFalse(valid_webhook_token('secret', 'incorrect'))
++        self.assertTrue(valid_webhook_token('secret', 'secret'))
++    def test_wrong_payment(self):
++        self.payment['id'] = 'pay_2'
++        self.assertFalse(self.check())
++    def test_wrong_qr(self):
++        self.payment['pixQrCodeId'] = 'other-qr'
++        self.assertFalse(self.check())
++    def test_unpaid(self):
++        self.payment['status'] = 'PENDING'
++        self.assertFalse(self.check())
++    def test_wrong_amount(self):
++        self.payment['value'] = '49.89'
++        self.assertFalse(self.check())
++    def test_legacy_without_exact_brl(self):
++        del self.invoice.expected_amount_brl
++        self.assertFalse(self.check())
++    def test_synthetic_qr(self):
++        self.invoice.external_id = 'ext_1234'
++        self.payment['pixQrCodeId'] = 'ext_1234'
++        self.assertFalse(self.check())
++    def test_nan(self):
++        self.payment['value'] = 'NaN'
++        self.assertFalse(self.check())
++    def test_event_not_received(self):
++        self.event['event'] = 'PAYMENT_CONFIRMED'
++        self.assertFalse(self.check())
++    def test_missing_event_id(self):
++        del self.event['id']
++        self.assertFalse(self.check())
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_conversation_policy.py b/tests/test_conversation_policy.py
+new file mode 100644
+index 0000000..5eb8b4b
+--- /dev/null
++++ b/tests/test_conversation_policy.py
+@@ -0,0 +1,141 @@
++"""Sem WhatsApp real; valida respostas e reservas persistentes."""
++import unittest
++from datetime import datetime, timedelta, timezone
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
++from packages.database.models import Base, OmnichannelInteraction, WhatsAppHandoffWindow, WhatsAppInboundClaim, WhatsAppReplyWindow
++from packages.leads.auto_outreach import AutonomousOutreachEngine
++from packages.leads.conversation_policy import asks_to_stop, canonical_phone_jid, handle_inbound, choose_reply
++
++
++class ConversationTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.engine = create_async_engine('sqlite+aiosqlite:///:memory:')
++        async with self.engine.begin() as c:
++            await c.run_sync(Base.metadata.create_all)
++        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
++    async def asyncTearDown(self):
++        await self.engine.dispose()
++    async def talk(self, message_id, msg, phone='5516993862008@s.whatsapp.net', **kw):
++        async with self.sessions() as db:
++            return await handle_inbound(db,message_id=message_id,phone_jid=phone,message=msg,name='Teste',**kw)
++    async def test_distinct_question_and_duplicate_across_sessions(self):
++        a=await self.talk('abc','Oi')
++        b=await self.talk('abc','Oi')
++        c=await self.talk('def','Quanto custa?')
++        self.assertEqual(a['reply'],'Olá! Sou o assistente virtual da equipe. Como posso ajudar?')
++        self.assertEqual(b['reason'],'DUPLICATE_EVENT')
++        self.assertEqual(b['reply'],'')
++        self.assertEqual(c['reason'],'REPLY_COOLDOWN')
++        async with self.sessions() as db:
++            self.assertEqual(len((await db.execute(select(WhatsAppInboundClaim))).scalars().all()),2)
++            rows=(await db.execute(select(OmnichannelInteraction))).scalars().all()
++            self.assertEqual(len(rows),2)
++            self.assertIn('WAIT_HUMAN_REVIEW', [r.deal_stage for r in rows])
++            window=await db.get(WhatsAppReplyWindow,'5516993862008')
++            window.last_reserved_at=datetime.now(timezone.utc)-timedelta(seconds=61)
++            await db.commit()
++        d=await self.talk('ghi','Quanto custa?')
++        self.assertIn('R$ 49,90',d['reply'])
++    async def test_missing_id_or_lid_no_send(self):
++        self.assertEqual((await self.talk('', 'Oi'))['reason'],'MISSING_MESSAGE_ID')
++        self.assertEqual((await self.talk('1','Oi',phone='987654321@lid'))['reason'],'UNRESOLVED_CONTACT')
++    async def test_phone_alias_normalization(self):
++        self.assertEqual(canonical_phone_jid('551698762345@s.whatsapp.net'),canonical_phone_jid('5516998762345@s.whatsapp.net'))
++        self.assertIsNone(canonical_phone_jid('123456789012@lid'))
++        self.assertIsNone(canonical_phone_jid('5516998762345@g.us'))
++    async def test_stop_and_persistent_suppression(self):
++        a=await self.talk('one','Não me mande mais mensagens')
++        self.assertIn('Não enviaremos mais',a['reply'])
++        b=await self.talk('two','Oi')
++        c=await self.talk('three','[CEO_HANDOFF_TRIGGER]',handoff=True)
++        self.assertEqual(b['reason'],'OPTED_OUT'); self.assertEqual(c['reply'],'')
++    async def test_handoff_limit_and_customer_can_still_ask(self):
++        a=await self.talk('magic1','[CEO_HANDOFF_TRIGGER]',handoff=True)
++        b=await self.talk('magic2','[CEO_HANDOFF_TRIGGER]',handoff=True)
++        c=await self.talk('question','Qual o preço?')
++        self.assertTrue(a['reply']); self.assertEqual(b['reason'],'HANDOFF_RATE_LIMIT')
++        self.assertEqual(c['reason'],'REPLY_COOLDOWN')
++        async with self.sessions() as db:
++            row=await db.get(WhatsAppHandoffWindow,'5516993862008')
++            row.last_sent_at=datetime.now(timezone.utc)-timedelta(hours=25)
++            window=await db.get(WhatsAppReplyWindow,'5516993862008')
++            window.last_reserved_at=datetime.now(timezone.utc)-timedelta(seconds=61)
++            await db.commit()
++        self.assertTrue((await self.talk('magic3','[CEO_HANDOFF_TRIGGER]',handoff=True))['reply'])
++    async def test_no_false_paid_and_stop_rules(self):
++        self.assertIn('precisa ser confirmado', choose_reply('foto', first=True, image=True))
++        self.assertIn('por escrito', choose_reply('audio', first=True, audio=True))
++        self.assertTrue(asks_to_stop('Não me envie mensagens'))
++        self.assertFalse(asks_to_stop('quero parar de perder clientes'))
++    async def test_bridge_endpoint_duplicate_and_stop(self):
++        import os
++        import httpx
++        import main
++        from unittest.mock import patch
++        async def fake_db():
++            async with self.sessions() as db:
++                yield db
++        main.app.dependency_overrides[main.get_db]=fake_db
++        body={'remote_jid':'5516993862008@s.whatsapp.net','phone_jid':'5516993862008@s.whatsapp.net','phone':'5516993862008','message_id':'bridge-1','message':'Oi'}
++        try:
++            with patch.dict(os.environ,{'WA_INTERNAL_SECRET':'s'*64}):
++                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),base_url='https://example.test') as c:
++                    h={'x-wa-internal-secret':'s'*64}
++                    a=await c.post('/api/webhooks/wa-bridge-inbound',json=body,headers=h)
++                    b=await c.post('/api/webhooks/wa-bridge-inbound',json=body,headers=h)
++                    self.assertEqual(a.status_code,200)
++                    self.assertIn('assistente virtual',a.json()['auto_reply'])
++                    self.assertEqual(b.json()['reason'],'DUPLICATE_EVENT')
++                    self.assertEqual(b.json()['auto_reply'],'')
++                    body['message_id']='bridge-2'; body['message']='Pare'
++                    stop=await c.post('/api/webhooks/wa-bridge-inbound',json=body,headers=h)
++                    self.assertEqual(stop.json()['auto_reply'],'Entendido. Não enviaremos mais mensagens automáticas para você.')
++        finally:
++            main.app.dependency_overrides.clear()
++    async def test_review_inbox_and_delivery_report(self):
++        import os
++        import httpx
++        import main
++        from unittest.mock import patch
++        async def fake_db():
++            async with self.sessions() as db:
++                yield db
++        main.app.dependency_overrides[main.get_db]=fake_db
++        jid='5516993862008@s.whatsapp.net'
++        base={'remote_jid':jid,'phone_jid':jid,'phone':'5516993862008','message_id':'review-1','message':'Oi'}
++        try:
++            with patch.dict(os.environ,{'WA_INTERNAL_SECRET':'s'*64}), patch('main.valid_session',side_effect=lambda cookie: cookie=='valid'):
++                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),base_url='https://empire.test') as c:
++                    internal={'x-wa-internal-secret':'s'*64}
++                    owner={'cookie':'empire_admin=valid','origin':'https://empire.test'}
++                    self.assertEqual((await c.get('/api/conversations')).status_code,401)
++                    self.assertEqual((await c.post('/api/webhooks/wa-bridge-inbound',json=base,headers=internal)).status_code,200)
++                    resp=await c.get('/api/conversations',headers=owner)
++                    self.assertEqual(resp.json()['items'][0]['delivery_status'],'PREPARED')
++                    payload={'phone_jid':jid,'message_id':'review-1','result':'SUBMITTED'}
++                    self.assertEqual((await c.post('/api/internal/wa-delivery-status',json=payload)).status_code,403)
++                    self.assertTrue((await c.post('/api/internal/wa-delivery-status',json=payload,headers=internal)).json()['updated'])
++                    payload['result']='UNCERTAIN'
++                    self.assertFalse((await c.post('/api/internal/wa-delivery-status',json=payload,headers=internal)).json()['updated'])
++                    self.assertEqual((await c.get('/api/conversations',headers=owner)).json()['items'][0]['delivery_status'],'SUBMITTED')
++                    base['message_id']='review-2'; base['message']='Quanto custa?'
++                    await c.post('/api/webhooks/wa-bridge-inbound',json=base,headers=internal)
++                    pending=(await c.get('/api/conversations?pending_only=true',headers=owner)).json()['items']
++                    self.assertEqual(len(pending),1)
++                    self.assertEqual(pending[0]['delivery_status'],'NO_AUTO_REPLY')
++                    p=f"/api/conversations/{pending[0]['id']}/reviewed"
++                    self.assertEqual((await c.post(p,headers={'cookie':'empire_admin=valid','origin':'https://evil.test'})).status_code,403)
++                    self.assertEqual((await c.post(p,headers=owner)).json(),{'ok':True,'sent':False})
++                    self.assertEqual((await c.get('/api/conversations?pending_only=true',headers=owner)).json()['items'],[])
++        finally:
++            main.app.dependency_overrides.clear()
++    async def test_automatic_marketing_and_followups_off(self):
++        async with self.sessions() as db:
++            with unittest.mock.patch('packages.leads.auto_outreach.EvolutionWhatsAppManager.send_real_whatsapp',new=unittest.mock.AsyncMock()) as send:
++                a=await AutonomousOutreachEngine.send_single_lead_now(db,'Empresa','5516999999999','oi')
++                b=await AutonomousOutreachEngine.run_abandoned_pix_and_ghost_recovery(db)
++                self.assertFalse(a['ok']); self.assertEqual(b['reason'],'FOLLOWUP_DISABLED')
++                send.assert_not_awaited()
++
++if __name__=='__main__': unittest.main()
+diff --git a/tests/test_hardening_staging.py b/tests/test_hardening_staging.py
+new file mode 100644
+index 0000000..1a8fbec
+--- /dev/null
++++ b/tests/test_hardening_staging.py
+@@ -0,0 +1,98 @@
++"""Testes locais isolados: nenhuma rede, Asaas, Neon ou WhatsApp real."""
++import os
++import sys
++import unittest
++from pathlib import Path
++from unittest.mock import AsyncMock, patch
++
++import httpx
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path[:0] = [str(ROOT), str(ROOT / 'apps' / 'api-gateway')]
++os.environ['DATABASE_URL'] = 'sqlite+aiosqlite:///:memory:'
++import main
++from packages.payments.gateways import PaymentGatewayManager, PaymentGatewayUnavailable
++from packages.security.auth_guard import SovereignSecurityGuard
++
++
++class FakeDB:
++    def __init__(self):
++        self.objects = []
++        self.commits = 0
++    def add(self, obj):
++        self.objects.append(obj)
++    async def commit(self):
++        self.commits += 1
++
++
++class FakeResponse:
++    def __init__(self, body):
++        self.status_code = 200
++        self.body = body
++    def json(self):
++        return self.body
++
++
++class FakeAsaas:
++    def __init__(self, *args, **kwargs):
++        pass
++    async def __aenter__(self):
++        return self
++    async def __aexit__(self, *args):
++        return False
++    async def get(self, url, **kw):
++        return FakeResponse({'data': [{'status': 'ACTIVE', 'key': 'test-key'}]})
++    async def post(self, url, **kw):
++        assert kw['json']['value'] == 49.90
++        return FakeResponse({'id': 'qr-test', 'payload': 'real-provider-payload'})
++
++
++class HardeningTests(unittest.IsolatedAsyncioTestCase):
++    async def test_no_fake_pix_or_database_invoice(self):
++        db = FakeDB()
++        with patch('packages.payments.gateways.ConfigVault.get_secret', new=AsyncMock(return_value='')):
++            with self.assertRaises(PaymentGatewayUnavailable):
++                await PaymentGatewayManager.create_invoice(db, 'ASAAS_PIX', 'Teste', 'x@example.com', 'Teste', 8.8319)
++        self.assertEqual(db.objects, [])
++        self.assertEqual(db.commits, 0)
++
++    async def test_provider_payload_without_image_is_not_fake_qr(self):
++        db = FakeDB()
++        with patch.dict(os.environ, {'ASAAS_SANDBOX_INBOX_ENABLED': 'true', 'ASAAS_BASE_URL': 'https://api-sandbox.asaas.com/v3'}), \
++             patch('packages.payments.gateways.ConfigVault.get_secret', new=AsyncMock(return_value='test')), \
++             patch('packages.payments.gateways.httpx.AsyncClient', FakeAsaas), \
++             patch('packages.payments.gateways.event_bus.publish', new=AsyncMock()):
++            inv = await PaymentGatewayManager.create_invoice(db, 'ASAAS_PIX', 'Teste', 'x@example.com', 'Teste', 8.8319)
++        self.assertEqual(inv.pix_copy_paste, 'real-provider-payload')
++        self.assertIsNone(inv.pix_qr_svg)
++        self.assertEqual(inv.amount_usd, 8.8319)
++        self.assertEqual(db.commits, 1)
++
++    async def test_fake_stripe_link_not_created(self):
++        db = FakeDB()
++        with patch('packages.payments.gateways.ConfigVault.get_secret', new=AsyncMock(return_value='')):
++            with self.assertRaises(PaymentGatewayUnavailable):
++                await PaymentGatewayManager.create_invoice(db, 'STRIPE', 'Teste', 'x@example.com', 'Teste', 10)
++        self.assertFalse(db.objects)
++
++    async def test_webhooks_fail_closed(self):
++        async def fake_db():
++            yield FakeDB()
++        main.app.dependency_overrides[main.get_db] = fake_db
++        try:
++            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
++                r = await client.post('/api/webhooks/payments/inv-demo/settle')
++                self.assertEqual(r.status_code, 401)
++                r = await client.post('/api/webhooks/asaas', json={'event':'PAYMENT_RECEIVED', 'payment':{'id':'fake'}})
++                self.assertEqual(r.status_code, 503)
++        finally:
++            main.app.dependency_overrides.clear()
++
++    async def test_no_totp_secret_in_overview(self):
++        info = SovereignSecurityGuard.get_security_overview()
++        for key in ('totp_secret_b32', 'otpauth_uri', 'current_totp_demo', 'default_password_hint', 'totp_qr_svg'):
++            self.assertNotIn(key, info)
++
++
++if __name__ == '__main__':
++    unittest.main()
