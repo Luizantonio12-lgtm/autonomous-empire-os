@@ -13,10 +13,11 @@ DEFAULT_SQLITE_PATH = MONOREPO_ROOT / "empire_state.db"
 def _normalize_async_db_url(raw_url: str) -> tuple[str, dict]:
     url = (raw_url or "").strip().strip("'").strip('"')
     if url.startswith("psql "):
-        # Caso o utilizador cole o comando 'psql postgresql://...' inteiro do Neon
+        # Caso o utilizador cole o comando "psql 'postgresql://...'" inteiro do Neon
         for token in url.split():
-            if token.startswith(("postgres://", "postgresql://", "postgresql+asyncpg://")):
-                url = token.strip("'").strip('"')
+            t_clean = token.strip("'").strip('"')
+            if t_clean.startswith(("postgres://", "postgresql://", "postgresql+asyncpg://")):
+                url = t_clean
                 break
 
     if not url:
