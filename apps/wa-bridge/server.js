@@ -31,6 +31,67 @@ let ownerWelcomed = false;
 
 // Guarda APENAS os números/JIDs comerciais abordados pelos Agentes (protege conversas pessoais do dono!)
 const commercialContacts = new Set();
+const commercialTails = new Set(); // últimos 8 dígitos (resolve 8 vs 9 dígitos no Brasil)
+const answeredMsgIds = new Set();
+const chatHistoryCache = new Map(); // remoteJid -> Array<msg>
+let sweepingBacklog = false;
+let triggerSweepFn = null;
+
+const BOT_SIGNATURE_WORDS = [
+  'agendacorte', 'zappedido', 'nexusflow', 'oficinazap', 'petagenda',
+  'imobzap', 'autoestética', 'autoestetica', 'reativacliente', 'topmapa',
+  'cobrafácil', 'cobrafacil', 'parceiroagência', 'parceiroagencia', 'trickspace',
+  'diagnóstico rápido', 'diagnostico rapido', 'nota 0 a 10', 'whatsapp 24h',
+  'pessoal da ', 'equipa da ', 'equipe da ', 'atendimento comercial pelo whatsapp',
+];
+
+const COMMERCIAL_REPLY_INTENTS = [
+  'pode mandar', 'manda o diagnóstico', 'manda o diagnostico', 'manda aqui',
+  'quero testar', 'quero conhecer', 'como funciona', 'qual o valor', 'quanto custa',
+  'tenho interesse', 'pode liberar', 'manda o resumo',
+];
+
+function registerCommercial(idOrJid) {
+  if (!idOrJid) return;
+  const s = String(idOrJid).trim();
+  if (!s) return;
+  commercialContacts.add(s);
+  const base = s.split('@')[0].split(':')[0];
+  if (base) commercialContacts.add(base);
+  const onlyDigits = base.replace(/\D/g, '');
+  if (onlyDigits.length >= 8 && !s.endsWith('@lid')) {
+    commercialContacts.add(onlyDigits);
+    commercialTails.add(onlyDigits.slice(-8));
+  }
+}
+
+function isOwnerSelf(jidOrDigits) {
+  const d = String(jidOrDigits || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+  const own = String(connectedPhone || '5516993862008').replace(/\D/g, '');
+  return d.length >= 8 && own.length >= 8 && d.slice(-8) === own.slice(-8);
+}
+
+function isKnownCommercial(remoteJid, altJid) {
+  for (const candidate of [remoteJid, altJid]) {
+    if (!candidate) continue;
+    if (commercialContacts.has(candidate)) return true;
+    const base = String(candidate).split('@')[0].split(':')[0];
+    if (commercialContacts.has(base)) return true;
+    if (!String(candidate).endsWith('@lid')) {
+      const d = base.replace(/\D/g, '');
+      if (d.length >= 8 && commercialTails.has(d.slice(-8))) return true;
+    }
+  }
+  return false;
+}
+
+function getMsgTimestampSec(msg) {
+  const t = msg?.messageTimestamp;
+  if (!t) return 0;
+  if (typeof t === 'number') return t;
+  if (typeof t === 'object' && typeof t.low === 'number') return t.low;
+  return Number(t) || 0;
+}
 
 function cleanDigits(raw) {
   let d = String(raw || '').replace(/\D/g, '');
@@ -60,8 +121,9 @@ function hasRegisteredCreds() {
 }
 
 function extractMessageText(msg) {
-  const m = msg?.message;
-  if (!m) return '';
+  const root = msg?.message;
+  if (!root) return '';
+  const m = root.ephemeralMessage?.message || root.viewOnceMessage?.message || root;
   return (
     m.conversation ||
     m.extendedTextMessage?.text ||
@@ -176,7 +238,7 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
       logger: pino({ level: 'silent' }),
       browser: Browsers.macOS('Chrome'),
       printQRInTerminal: false,
-      syncFullHistory: false,
+      syncFullHistory: true,
       markOnlineOnConnect: false,
     });
     sock = activeSock;
@@ -305,90 +367,156 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
       }
     });
 
-    // Recebe respostas dos clientes abordados e aciona o Closer IA + Pix Asaas!
-    activeSock.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
-      for (const msg of messages || []) {
-        if (!msg?.message || msg.key.fromMe) continue;
-        const remoteJid = msg.key.remoteJid || '';
-        if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
+    async function processIncomingCustomerMsg(msg, { forceCommercial = false } = {}) {
+      if (!msg?.message || msg.key?.fromMe) return false;
+      const remoteJid = msg.key.remoteJid || '';
+      if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return false;
+      const altJid = msg.key.remoteJidAlt || msg.key.participantAlt || msg.key.senderPn || '';
+      if (isOwnerSelf(remoteJid) || isOwnerSelf(altJid)) return false;
 
-        const senderDigits = remoteJid.split('@')[0].split(':')[0];
-        const audioMsg = msg.message?.audioMessage || msg.message?.ephemeralMessage?.message?.audioMessage || null;
-        let text = extractMessageText(msg);
-        let audioBase64 = '';
-        let audioMime = 'audio/ogg';
+      const msgId = msg.key.id || '';
+      if (msgId && answeredMsgIds.has(msgId)) return false;
 
-        if (!text && !audioMsg) continue;
+      const realPhoneRaw = (!remoteJid.endsWith('@lid') ? remoteJid : altJid || remoteJid)
+        .split('@')[0]
+        .split(':')[0];
 
-        const low = (text || '').toLowerCase();
-        const mentionsProduct =
-          low.includes('agendacorte') ||
-          low.includes('zappedido') ||
-          low.includes('nexusflow') ||
-          low.includes('oficinazap') ||
-          low.includes('petagenda') ||
-          low.includes('imobzap') ||
-          low.includes('autoestética') ||
-          low.includes('autoestetica') ||
-          low.includes('reativacliente') ||
-          low.includes('topmapa') ||
-          low.includes('cobrafácil') ||
-          low.includes('cobrafacil') ||
-          low.includes('parceiroagência') ||
-          low.includes('trickspace') ||
-          low.includes('quero testar') ||
-          low.includes('sistema ia') ||
-          low.includes('teste hoje');
+      const audioMsg =
+        msg.message?.audioMessage ||
+        msg.message?.ephemeralMessage?.message?.audioMessage ||
+        null;
+      let text = extractMessageText(msg);
+      let audioBase64 = '';
+      let audioMime = 'audio/ogg';
 
-        // Só responde automaticamente se for um cliente comercial abordado pelos agentes (ou que citou nossos produtos)
-        if (!commercialContacts.has(remoteJid) && !commercialContacts.has(senderDigits) && !mentionsProduct) {
-          continue;
+      if (!text && !audioMsg) return false;
+
+      const low = (text || '').toLowerCase();
+      const mentionsProductOrIntent =
+        BOT_SIGNATURE_WORDS.some((w) => low.includes(w)) ||
+        COMMERCIAL_REPLY_INTENTS.some((w) => low.includes(w));
+
+      if (!forceCommercial && !isKnownCommercial(remoteJid, altJid) && !mentionsProductOrIntent) {
+        return false;
+      }
+
+      registerCommercial(remoteJid);
+      if (altJid) registerCommercial(altJid);
+      if (msgId) answeredMsgIds.add(msgId);
+
+      if (!text && audioMsg && typeof downloadMediaMessage === 'function') {
+        try {
+          const buf = await downloadMediaMessage(
+            msg,
+            'buffer',
+            {},
+            { logger: pino({ level: 'silent' }), reuploadRequest: activeSock.updateMediaMessage }
+          );
+          if (buf && buf.length > 0 && buf.length <= 4 * 1024 * 1024) {
+            audioBase64 = Buffer.from(buf).toString('base64');
+            audioMime = String(audioMsg.mimetype || 'audio/ogg').split(';')[0].trim();
+          }
+        } catch (e) {
+          console.error('[WA-BRIDGE] Audio download error:', e?.message);
         }
-        commercialContacts.add(remoteJid);
-        commercialContacts.add(senderDigits);
+        if (!audioBase64) {
+          text = '[Áudio recebido — pedir resumo rápido ou oferecer demonstração]';
+        }
+      }
 
-        if (!text && audioMsg && typeof downloadMediaMessage === 'function') {
-          try {
-            const buf = await downloadMediaMessage(
-              msg,
-              'buffer',
-              {},
-              { logger: pino({ level: 'silent' }), reuploadRequest: activeSock.updateMediaMessage }
-            );
-            if (buf && buf.length > 0 && buf.length <= 4 * 1024 * 1024) {
-              audioBase64 = Buffer.from(buf).toString('base64');
-              audioMime = String(audioMsg.mimetype || 'audio/ogg').split(';')[0].trim();
+      const pushName = msg.pushName || `Cliente ${realPhoneRaw}`;
+      const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
+        remote_jid: remoteJid,
+        phone: realPhoneRaw,
+        contact_name: pushName,
+        message: text || '[ÁUDIO_WHATSAPP]',
+        audio_base64: audioBase64,
+        audio_mime: audioMime,
+      });
+
+      if (replyData && replyData.auto_reply && sock && connectionStatus === 'CONNECTED') {
+        try {
+          await sock.sendPresenceUpdate('composing', remoteJid);
+          await new Promise((r) => setTimeout(r, 1800));
+          await sock.sendMessage(remoteJid, { text: replyData.auto_reply });
+          await sock.sendPresenceUpdate('paused', remoteJid);
+          sentCount += 1;
+          return true;
+        } catch (e) {
+          console.error('[WA-BRIDGE] Auto-reply send error:', e?.message);
+        }
+      }
+      return false;
+    }
+
+    function indexHistoryMsg(msg) {
+      if (!msg?.message || !msg.key?.remoteJid) return;
+      const jid = msg.key.remoteJid;
+      if (jid.endsWith('@g.us') || jid === 'status@broadcast' || isOwnerSelf(jid)) return;
+      const altJid = msg.key.remoteJidAlt || msg.key.senderPn || '';
+      if (msg.key.fromMe) {
+        const myTxt = extractMessageText(msg).toLowerCase();
+        if (BOT_SIGNATURE_WORDS.some((w) => myTxt.includes(w))) {
+          registerCommercial(jid);
+          if (altJid) registerCommercial(altJid);
+        }
+      }
+      const arr = chatHistoryCache.get(jid) || [];
+      if (!arr.some((x) => x.key?.id && x.key.id === msg.key.id)) {
+        arr.push(msg);
+        arr.sort((a, b) => getMsgTimestampSec(a) - getMsgTimestampSec(b));
+        if (arr.length > 25) arr.splice(0, arr.length - 25);
+        chatHistoryCache.set(jid, arr);
+      }
+    }
+
+    async function sweepUnansweredCommercialChats() {
+      if (sweepingBacklog || !sock || connectionStatus !== 'CONNECTED') return 0;
+      sweepingBacklog = true;
+      let answeredNow = 0;
+      try {
+        const nowSec = Math.floor(Date.now() / 1000);
+        for (const [jid, msgs] of chatHistoryCache.entries()) {
+          if (!msgs.length || answeredNow >= 15) continue;
+          const lastMsg = msgs[msgs.length - 1];
+          if (!lastMsg || lastMsg.key?.fromMe) continue;
+          const ageSec = nowSec - getMsgTimestampSec(lastMsg);
+          if (ageSec > 72 * 3600) continue; // ignora conversas com mais de 3 dias
+          const altJid = lastMsg.key?.remoteJidAlt || lastMsg.key?.senderPn || '';
+          const hadBotPitch = msgs.some(
+            (m) => m.key?.fromMe && BOT_SIGNATURE_WORDS.some((w) => extractMessageText(m).toLowerCase().includes(w))
+          );
+          if (hadBotPitch || isKnownCommercial(jid, altJid)) {
+            const ok = await processIncomingCustomerMsg(lastMsg, { forceCommercial: true });
+            if (ok) {
+              answeredNow += 1;
+              await new Promise((r) => setTimeout(r, 4500));
             }
-          } catch (e) {
-            console.error('[WA-BRIDGE] Audio download error:', e?.message);
-          }
-          if (!audioBase64) {
-            text = '[Áudio recebido — pedir resumo rápido em texto ou oferecer demonstração]';
           }
         }
+      } finally {
+        sweepingBacklog = false;
+      }
+      return answeredNow;
+    }
+    triggerSweepFn = sweepUnansweredCommercialChats;
 
-        const pushName = msg.pushName || `Cliente ${senderDigits}`;
-        const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
-          remote_jid: remoteJid,
-          phone: senderDigits,
-          contact_name: pushName,
-          message: text || '[ÁUDIO_WHATSAPP]',
-          audio_base64: audioBase64,
-          audio_mime: audioMime,
-        });
+    activeSock.ev.on('messaging-history.set', ({ messages }) => {
+      try {
+        for (const m of messages || []) indexHistoryMsg(m);
+        setTimeout(() => sweepUnansweredCommercialChats().catch(() => {}), 5000);
+      } catch (_) {}
+    });
 
-        if (replyData && replyData.auto_reply && sock && connectionStatus === 'CONNECTED') {
-          try {
-            await sock.sendPresenceUpdate('composing', remoteJid);
-            await new Promise((r) => setTimeout(r, 1800));
-            await sock.sendMessage(remoteJid, { text: replyData.auto_reply });
-            await sock.sendPresenceUpdate('paused', remoteJid);
-            sentCount += 1;
-          } catch (e) {
-            console.error('[WA-BRIDGE] Auto-reply send error:', e?.message);
-          }
-        }
+    // Recebe respostas dos clientes abordados (tempo real + sincronização offline) e aciona o Closer IA + Pix Asaas!
+    activeSock.ev.on('messages.upsert', async ({ messages, type }) => {
+      for (const m of messages || []) indexHistoryMsg(m);
+      if (type !== 'notify') {
+        setTimeout(() => sweepUnansweredCommercialChats().catch(() => {}), 3500);
+        return;
+      }
+      for (const msg of messages || []) {
+        await processIncomingCustomerMsg(msg);
       }
     });
   } finally {
@@ -396,47 +524,54 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
   }
 }
 
-// Se já existir credencial registada em disco, reconecta ao arrancar;
-// caso contrário, tenta restaurar backup criptografado do Banco Cloud após o API Gateway subir!
-if (hasRegisteredCreds()) {
-  startSocket({ resetAuth: false });
-} else {
-  clearAuthDir();
-  setTimeout(() => {
-    const req = http.get(
-      { hostname: '127.0.0.1', port: parseInt(API_PORT, 10), path: '/api/internal/wa-auth-restore', timeout: 8000 },
-      (res) => {
-        let chunks = '';
-        res.on('data', (c) => (chunks += c));
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(chunks || '{}');
-            if (Array.isArray(parsed?.known_contacts)) {
-              for (const ph of parsed.known_contacts) {
-                if (ph) {
-                  commercialContacts.add(String(ph));
-                  commercialContacts.add(`${ph}@s.whatsapp.net`);
-                }
-              }
-            }
-            if (parsed && parsed.ok && parsed.files && parsed.files['creds.json']) {
+// Restaura backup criptografado do Banco Cloud com retentativas até o API Gateway subir!
+function restoreFromCloudWithRetry(attemptsLeft = 40) {
+  const req = http.get(
+    { hostname: '127.0.0.1', port: parseInt(API_PORT, 10), path: '/api/internal/wa-auth-restore', timeout: 12000 },
+    (res) => {
+      let chunks = '';
+      res.on('data', (c) => (chunks += c));
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          if (attemptsLeft > 1) setTimeout(() => restoreFromCloudWithRetry(attemptsLeft - 1), 3000);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(chunks || '{}');
+          if (Array.isArray(parsed?.known_contacts)) {
+            for (const ph of parsed.known_contacts) registerCommercial(ph);
+          }
+          if (parsed && parsed.ok && parsed.files && parsed.files['creds.json']) {
+            if (!hasRegisteredCreds()) {
               fs.mkdirSync(AUTH_DIR, { recursive: true });
               for (const [fn, content] of Object.entries(parsed.files)) {
                 if (fn.endsWith('.json') && !fn.includes('/') && !fn.includes('..')) {
                   fs.writeFileSync(path.join(AUTH_DIR, fn), String(content), 'utf8');
                 }
               }
-              if (hasRegisteredCreds()) {
-                console.log('[WA-BRIDGE] Sessão WhatsApp restaurada automaticamente do Banco Cloud!');
-                startSocket({ resetAuth: false });
-              }
             }
-          } catch (_) {}
-        });
-      }
-    );
-    req.on('error', () => {});
-  }, 4500);
+            if (hasRegisteredCreds() && connectionStatus === 'DISCONNECTED') {
+              console.log('[WA-BRIDGE] Sessão WhatsApp restaurada automaticamente do Banco Neon Cloud!');
+              startSocket({ resetAuth: false });
+            }
+          }
+        } catch (_) {
+          if (attemptsLeft > 1) setTimeout(() => restoreFromCloudWithRetry(attemptsLeft - 1), 3000);
+        }
+      });
+    }
+  );
+  req.on('error', () => {
+    if (attemptsLeft > 1) setTimeout(() => restoreFromCloudWithRetry(attemptsLeft - 1), 3000);
+  });
+}
+
+if (hasRegisteredCreds()) {
+  startSocket({ resetAuth: false });
+  restoreFromCloudWithRetry(15);
+} else {
+  clearAuthDir();
+  setTimeout(() => restoreFromCloudWithRetry(40), 2500);
 }
 
 function readJson(req) {
@@ -573,10 +708,12 @@ const server = http.createServer(async (req, res) => {
       }
 
       let targetJid = null;
+      let targetLid = null;
       for (const cand of candidates) {
         const check = await sock.onWhatsApp(cand);
         if (check && check[0] && check[0].exists) {
           targetJid = check[0].jid;
+          targetLid = check[0].lid || null;
           break;
         }
       }
@@ -585,9 +722,9 @@ const server = http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ ok: false, exists: false, reason: 'NO_WHATSAPP_ACCOUNT' }));
       }
 
-      commercialContacts.add(targetJid);
-      commercialContacts.add(targetJid.split('@')[0]);
-      commercialContacts.add(digits);
+      registerCommercial(targetJid);
+      if (targetLid) registerCommercial(targetLid);
+      registerCommercial(digits);
 
       await sock.sendPresenceUpdate('composing', targetJid);
       await new Promise((r) => setTimeout(r, 1400));
@@ -622,6 +759,14 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 500;
       return res.end(JSON.stringify({ ok: false, error: err?.message || 'NOTIFY_OWNER_FAILED' }));
     }
+  }
+
+  if (req.method === 'POST' && req.url === '/sweep') {
+    if (!sock || connectionStatus !== 'CONNECTED' || typeof triggerSweepFn !== 'function') {
+      return res.end(JSON.stringify({ ok: false, error: 'WHATSAPP_NOT_CONNECTED', cached_chats: chatHistoryCache.size }));
+    }
+    const answered = await triggerSweepFn();
+    return res.end(JSON.stringify({ ok: true, answered_now: answered, cached_chats: chatHistoryCache.size }));
   }
 
   if (req.method === 'POST' && req.url === '/disconnect') {

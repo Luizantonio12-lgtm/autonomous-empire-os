@@ -914,6 +914,16 @@ async def whatsapp_test_vip_alert():
     return out
 
 
+@app.post("/api/whatsapp/sweep-unanswered")
+async def sweep_unanswered_whatsapp_chats():
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            r = await client.post("http://127.0.0.1:3005/sweep", json={})
+            return r.json()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @app.post("/api/webhooks/evolution")
 async def evolution_whatsapp_webhook(
     payload: EvolutionWebhookPayload,
