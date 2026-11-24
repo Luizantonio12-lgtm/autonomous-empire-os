@@ -640,7 +640,7 @@ export default function App() {
           niche: venNiche,
           tagline: venTagline,
           monthly_price_usd: Number(venPrice) || 297,
-          initial_customers: 4,
+          initial_customers: 0,
         }),
       });
       await fetchOverview();
@@ -1129,6 +1129,16 @@ export default function App() {
               <Lock className="w-3.5 h-3.5" />
               2FA Lock
             </button>
+
+            <a
+              href="/vitrine"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 text-xs font-bold transition"
+              title="Abrir Vitrine Pública (Teste Robô em 3 Segundos no WhatsApp)"
+            >
+              ⚡ Vitrine 3s
+            </a>
 
             <a
               href="/api/system/export-monorepo.zip"

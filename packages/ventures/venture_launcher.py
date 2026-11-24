@@ -264,10 +264,20 @@ document.getElementById('checkoutForm').addEventListener('submit', async (e) => 
           '<strong style="color:#34d399;font-size:14px;">📲 Escaneia o QR Code Pix Oficial (R$ ' + data.brl_amount + ')</strong>' +
           '<div style="margin:12px auto;display:flex;justify-content:center;">' + data.pix_qr_svg + '</div>' +
           '<input id="pixCodeOut" readonly value="' + data.pix_copy_paste + '" style="width:100%;font-size:11px;padding:8px;border-radius:8px;background:#020617;color:#a7f3d0;border:1px solid #10b981;margin-bottom:8px;" />' +
-          '<button type="button" onclick="navigator.clipboard.writeText(document.getElementById(\'pixCodeOut\').value);this.textContent=\'✅ Código Pix Copiado!\'" style="width:100%;padding:9px;border-radius:8px;background:#10b981;color:#022c22;font-weight:800;border:none;cursor:pointer;margin-bottom:6px;">Copiar Pix Copia e Cola</button>' +
+          '<button type="button" id="copyPixBtn" style="width:100%;padding:9px;border-radius:8px;background:#10b981;color:#022c22;font-weight:800;border:none;cursor:pointer;margin-bottom:6px;">Copiar Pix Copia e Cola</button>' +
           (data.whatsapp_support_url ? '<a href="' + data.whatsapp_support_url + '" target="_blank" style="display:block;text-decoration:none;padding:8px;border-radius:8px;background:#065f46;color:#ecfdf5;font-weight:700;">💬 Confirmar Acesso no WhatsApp</a>' : '') +
           '<div style="font-size:11px;color:#94a3b8;margin-top:6px;">Assim que pagares no teu banco, o sistema libera o teu acesso automaticamente!</div>' +
           '</div>';
+        const copyBtn = document.getElementById('copyPixBtn');
+        if (copyBtn) {
+          copyBtn.addEventListener('click', () => {
+            const codeEl = document.getElementById('pixCodeOut');
+            if (codeEl && navigator.clipboard) {
+              navigator.clipboard.writeText(codeEl.value);
+              copyBtn.textContent = '✅ Código Pix Copiado!';
+            }
+          });
+        }
       } else if (data.checkout_url && provider === 'STRIPE') {
         resBox.innerHTML = '<strong>💳 Checkout Gerado!</strong><br/><a href="' + data.checkout_url + '" target="_blank" style="color:#38bdf8;font-weight:700;">Abrir Pagamento Seguro Stripe →</a>';
       } else {

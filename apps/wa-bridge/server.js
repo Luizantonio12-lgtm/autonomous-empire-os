@@ -135,10 +135,29 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     let saveChain = Promise.resolve();
+    let backupTimer = null;
+    const syncAuthToCloudDb = () => {
+      if (backupTimer) clearTimeout(backupTimer);
+      backupTimer = setTimeout(() => {
+        try {
+          if (!hasRegisteredCreds()) return;
+          const filesMap = {};
+          for (const fname of fs.readdirSync(AUTH_DIR)) {
+            if (fname.endsWith('.json')) {
+              filesMap[fname] = fs.readFileSync(path.join(AUTH_DIR, fname), 'utf8');
+            }
+          }
+          postJsonLocal('/api/internal/wa-auth-backup', { files: filesMap });
+        } catch (_) {}
+      }, 2500);
+    };
     const enqueueSaveCreds = () => {
-      saveChain = saveChain.then(() => saveCreds()).catch((err) => {
-        console.error('[WA-BRIDGE] saveCreds error:', err?.message);
-      });
+      saveChain = saveChain
+        .then(() => saveCreds())
+        .then(() => syncAuthToCloudDb())
+        .catch((err) => {
+          console.error('[WA-BRIDGE] saveCreds error:', err?.message);
+        });
       return saveChain;
     };
 
@@ -302,6 +321,17 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
           low.includes('agendacorte') ||
           low.includes('zappedido') ||
           low.includes('nexusflow') ||
+          low.includes('oficinazap') ||
+          low.includes('petagenda') ||
+          low.includes('imobzap') ||
+          low.includes('autoestética') ||
+          low.includes('autoestetica') ||
+          low.includes('reativacliente') ||
+          low.includes('topmapa') ||
+          low.includes('cobrafácil') ||
+          low.includes('cobrafacil') ||
+          low.includes('parceiroagência') ||
+          low.includes('quero testar') ||
           low.includes('sistema ia') ||
           low.includes('teste hoje');
 
@@ -336,11 +366,39 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
   }
 }
 
-// Se já existir credencial registada em disco, reconecta ao arrancar
+// Se já existir credencial registada em disco, reconecta ao arrancar;
+// caso contrário, tenta restaurar backup criptografado do Banco Cloud após o API Gateway subir!
 if (hasRegisteredCreds()) {
   startSocket({ resetAuth: false });
 } else {
   clearAuthDir();
+  setTimeout(() => {
+    const req = http.get(
+      { hostname: '127.0.0.1', port: parseInt(API_PORT, 10), path: '/api/internal/wa-auth-restore', timeout: 8000 },
+      (res) => {
+        let chunks = '';
+        res.on('data', (c) => (chunks += c));
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(chunks || '{}');
+            if (parsed && parsed.ok && parsed.files && parsed.files['creds.json']) {
+              fs.mkdirSync(AUTH_DIR, { recursive: true });
+              for (const [fn, content] of Object.entries(parsed.files)) {
+                if (fn.endsWith('.json') && !fn.includes('/') && !fn.includes('..')) {
+                  fs.writeFileSync(path.join(AUTH_DIR, fn), String(content), 'utf8');
+                }
+              }
+              if (hasRegisteredCreds()) {
+                console.log('[WA-BRIDGE] Sessão WhatsApp restaurada automaticamente do Banco Cloud!');
+                startSocket({ resetAuth: false });
+              }
+            }
+          } catch (_) {}
+        });
+      }
+    );
+    req.on('error', () => {});
+  }, 4500);
 }
 
 function readJson(req) {
@@ -533,6 +591,7 @@ const server = http.createServer(async (req, res) => {
       if (sock) await sock.logout();
     } catch (_) {}
     clearAuthDir();
+    postJsonLocal('/api/internal/wa-auth-backup', { files: {} });
     sock = null;
     ownerWelcomed = false;
     connectionStatus = 'DISCONNECTED';

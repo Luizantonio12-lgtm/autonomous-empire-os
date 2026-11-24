@@ -156,51 +156,29 @@ async def seed_initial_empire_state() -> None:
             content="Apenas liquidações reais confirmadas via Webhook Asaas Pix ou Stripe entram como RECEITA no Ledger Financeiro.",
         )
 
-        # Portfólio Comercial de 3 Empresas SaaS Prontas p/ Vender no Pix (0 simulações financeiras)
-        await AutonomousVentureBuilder.launch_full_venture(
-            db=db,
-            name="NexusFlow AI",
-            niche="Clínicas Médicas, Odontológicas & Escritórios",
-            tagline="Atendimento WhatsApp IA 24h, Agendamento Anti-Faltas e Cobrança Pix Automática",
-            monthly_price_usd=49.00,
-            initial_customers=0,
-        )
-
-        await AutonomousVentureBuilder.launch_full_venture(
-            db=db,
-            name="AgendaCorte Pro AI",
-            niche="Barbearias, Salões de Beleza & Estética",
-            tagline="Agendamento 24h pelo WhatsApp, Lembrete Automático de Horário e Sinal via Pix",
-            monthly_price_usd=19.00,
-            initial_customers=0,
-        )
-
-        await AutonomousVentureBuilder.launch_full_venture(
-            db=db,
-            name="ZapPedido Delivery AI",
-            niche="Pizzarias, Hamburguerias & Delivery",
-            tagline="Cardápio Inteligente no WhatsApp, Fechamento de Pedido IA e Pagamento Pix na Hora",
-            monthly_price_usd=29.00,
-            initial_customers=0,
-        )
-
-        await AutonomousVentureBuilder.launch_full_venture(
-            db=db,
-            name="OficinaZap AI",
-            niche="Oficinas Mecânicas, Auto Centers & Troca de Óleo",
-            tagline="Orçamento Rápido no WhatsApp, Aviso Automático de Carro Pronto e Lembrete de Troca de Óleo",
-            monthly_price_usd=26.02,
-            initial_customers=0,
-        )
-
-        await AutonomousVentureBuilder.launch_full_venture(
-            db=db,
-            name="PetAgenda AI",
-            niche="Pet Shops, Banho e Tosa & Clínicas Veterinárias",
-            tagline="Agendamento Automático de Banho e Tosa no WhatsApp, Aviso de Pet Pronto e Cobrança Pix",
-            monthly_price_usd=17.17,
-            initial_customers=0,
-        )
+        # Portfólio Comercial Completo das 11 Empresas SaaS Prontas p/ Vender no Pix (0 simulações financeiras)
+        ventures_seed = [
+            ("NexusFlow AI", "Clínicas Médicas, Odontológicas & Escritórios", "Atendimento WhatsApp IA 24h, Agendamento Anti-Faltas e Cobrança Pix Automática", 49.00),
+            ("ImobZap AI", "Imobiliárias, Corretores de Imóveis & Locação", "Qualificação Automática de Compradores e Inquilinos no WhatsApp 24h, Filtro de Renda/FGTS e Agendamento de Visitas", 52.00),
+            ("ReativaCliente Flash AI", "Clínicas, Salões, Oficinas & Comércios com Base de Clientes Inativos", "Campanha Relâmpago de IA no WhatsApp que Chama Clientes Sumidos há +90 Dias e Enche a Agenda em 48 Horas", 44.00),
+            ("ParceiroAgência 30% AI", "Agências de Marketing, Gestores de Tráfego Pago & Social Media", "Programa Oficial White-Label & Parceria 30% Recorrente: Coloque Nossa IA de Fechamento WhatsApp nos Seus Clientes", 35.00),
+            ("AutoEstética Pro AI", "Estética Automotiva, Vitrificação, Polimento & Insulfilm", "Orçamento Instantâneo por Porte do Veículo no WhatsApp, Agenda de Box e Lembrete Automático de Retorno em 30 Dias", 31.00),
+            ("ZapPedido Delivery AI", "Pizzarias, Hamburguerias & Delivery", "Cardápio Inteligente no WhatsApp, Fechamento de Pedido IA e Pagamento Pix na Hora (0% Taxa)", 29.00),
+            ("CobraFácil Pix AI", "Academias, Escolas, Personal Trainers, Contabilidades & Mensalidades", "Cobrador Automático Educado no WhatsApp com Pix Copia e Cola que Recupera Inadimplentes sem Constrangimento", 27.00),
+            ("OficinaZap AI", "Oficinas Mecânicas, Auto Centers & Troca de Óleo", "Orçamento Rápido no WhatsApp, Aviso Automático de Carro Pronto e Lembrete de Troca de Óleo", 26.02),
+            ("TopMapa 5 Estrelas AI", "Negócios Locais, Restaurantes, Clínicas & Lojas Físicas", "Pós-Venda Automático no WhatsApp que Pede Avaliação 5 Estrelas no Google Maps e Coloca Sua Loja em 1º na Cidade", 22.00),
+            ("AgendaCorte Pro AI", "Barbearias, Salões de Beleza & Estética", "Agendamento 24h pelo WhatsApp, Lembrete Automático de Horário e Sinal via Pix", 19.00),
+            ("PetAgenda AI", "Pet Shops, Banho e Tosa & Clínicas Veterinárias", "Agendamento Automático de Banho e Tosa no WhatsApp, Aviso de Pet Pronto e Cobrança Pix", 17.17),
+        ]
+        for v_name, v_niche, v_tagline, v_price in ventures_seed:
+            await AutonomousVentureBuilder.launch_full_venture(
+                db=db,
+                name=v_name,
+                niche=v_niche,
+                tagline=v_tagline,
+                monthly_price_usd=v_price,
+                initial_customers=0,
+            )
 
         await MetaCreatorAgent.propose_specialized_agent(
             db=db,

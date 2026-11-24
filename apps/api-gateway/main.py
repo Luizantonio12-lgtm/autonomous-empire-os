@@ -1,7 +1,10 @@
 import asyncio
+import json
 import os
 import sys
+import tempfile
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -187,7 +190,7 @@ class LaunchVentureRequest(BaseModel):
     niche: str = Field(..., min_length=3)
     tagline: str = Field(..., min_length=5)
     monthly_price_usd: float = Field(default=297.0, gt=0)
-    initial_customers: int = Field(default=3, ge=0)
+    initial_customers: int = Field(default=0, ge=0)
 
 
 class VentureCheckoutRequest(BaseModel):
@@ -213,14 +216,71 @@ async def health_check():
 
 @app.get("/api/system/export-monorepo.zip")
 async def export_full_monorepo_zip():
-    export_zip = MONOREPO_ROOT.parent / "autonomous-empire-production-ready.zip"
+    export_zip = Path(tempfile.gettempdir()) / "autonomous-empire-production-ready.zip"
+    skip_dirs = {".git", "node_modules", "__pycache__", ".wa_auth", ".venv", ".mypy_cache", ".pytest_cache"}
     if not export_zip.exists():
-        raise HTTPException(status_code=404, detail="Pacote de produção ainda não empacotado.")
+        with zipfile.ZipFile(export_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root_dir, dirnames, filenames in os.walk(MONOREPO_ROOT):
+                dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+                for fname in filenames:
+                    if fname.endswith((".db", ".db-wal", ".db-shm", ".pyc")):
+                        continue
+                    full_p = Path(root_dir) / fname
+                    rel_p = full_p.relative_to(MONOREPO_ROOT)
+                    zf.write(full_p, f"autonomous-empire/{rel_p}")
     return FileResponse(
         path=str(export_zip),
         media_type="application/zip",
         filename="autonomous-empire-production-ready.zip",
     )
+
+
+@app.post("/api/internal/wa-auth-backup")
+async def internal_wa_auth_backup(request: Request, db: AsyncSession = Depends(get_db)):
+    if request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Loopback only.")
+    from packages.database.models import RuntimeVault
+
+    body = await request.json()
+    files = body.get("files") or {}
+    res = await db.execute(select(RuntimeVault).where(RuntimeVault.key_name == "__INTERNAL_WA_AUTH_BUNDLE__"))
+    row = res.scalar_one_or_none()
+    if not files:
+        if row:
+            await db.delete(row)
+            await db.commit()
+        return {"ok": True, "cleared": True}
+    serialized = json.dumps(files, ensure_ascii=False)
+    if row:
+        row.secret_value = serialized
+    else:
+        db.add(RuntimeVault(key_name="__INTERNAL_WA_AUTH_BUNDLE__", secret_value=serialized))
+    await db.commit()
+    return {"ok": True, "files_saved": len(files)}
+
+
+@app.get("/api/internal/wa-auth-restore")
+async def internal_wa_auth_restore(request: Request, db: AsyncSession = Depends(get_db)):
+    if request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Loopback only.")
+    from packages.database.models import RuntimeVault
+
+    res = await db.execute(select(RuntimeVault).where(RuntimeVault.key_name == "__INTERNAL_WA_AUTH_BUNDLE__"))
+    row = res.scalar_one_or_none()
+    if not row or not row.secret_value:
+        return {"ok": False, "files": {}}
+    try:
+        return {"ok": True, "files": json.loads(row.secret_value)}
+    except Exception:
+        return {"ok": False, "files": {}}
+
+
+@app.get("/vitrine")
+async def serve_live_3s_vitrine():
+    vitrine_path = GATEWAY_DIR / "vitrine_3s.html"
+    if vitrine_path.exists():
+        return FileResponse(str(vitrine_path), media_type="text/html")
+    raise HTTPException(status_code=404, detail="Vitrine não encontrada.")
 
 
 @app.get("/api/dashboard/overview")
@@ -549,6 +609,7 @@ async def execute_direct_command(payload: CommandDirectiveRequest):
 async def toggle_autopilot(payload: AutopilotToggleRequest):
     try:
         state = await AutonomousSchedulerDaemon.set_autopilot(payload.enabled)
+        AutonomousOutreachEngine.set_autopilot(payload.enabled)
         return {"ok": True, "scheduler": state}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

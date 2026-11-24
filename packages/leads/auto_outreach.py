@@ -72,14 +72,19 @@ ROTATION_CITIES = (
 )
 
 ROTATION_NICHES = (
-    "Barbearia",
+    "Clínica Odontológica",
+    "Imobiliária",
+    "Oficina Mecânica",
+    "Estética Automotiva",
     "Pizzaria",
-    "Salão de Beleza",
+    "Academia",
+    "Agência de Marketing",
+    "Clínica Estética",
     "Hamburgueria",
     "Pet Shop",
-    "Clínica Estética",
-    "Clínica Odontológica",
-    "Oficina Mecânica",
+    "Barbearia",
+    "Salão de Beleza",
+    "Restaurante",
 )
 
 
@@ -345,11 +350,12 @@ class AutonomousOutreachEngine:
                     if wa_state.get("status") != "CONNECTED":
                         break
 
+                    outbound_msg = lead.get("warm_opener") or lead["whatsapp_pitch"]
                     res = await cls.send_single_lead_now(
                         db=db,
                         business_name=lead["business_name"],
                         phone_digits=lead["phone_digits"],
-                        message=lead["whatsapp_pitch"],
+                        message=outbound_msg,
                         venture_name=lead["venture_name"],
                         price_usd=lead["price_usd"],
                     )

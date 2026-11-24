@@ -225,16 +225,31 @@ class RealLeadHunter:
             v_all = (await db.execute(select(BusinessVenture))).scalars().all()
             low_n = niche_clean.lower()
             for v in v_all:
-                if ("ofic" in low_n or "mecân" in low_n or "mecan" in low_n or "auto" in low_n) and "OficinaZap" in v.name:
+                if ("imob" in low_n or "corretor" in low_n or "imóv" in low_n or "imov" in low_n) and "ImobZap" in v.name:
+                    venture = v
+                    break
+                if ("estética auto" in low_n or "estetica auto" in low_n or "insulfilm" in low_n or "lava" in low_n or "polimento" in low_n) and "AutoEstética" in v.name:
+                    venture = v
+                    break
+                if ("agênc" in low_n or "agenc" in low_n or "tráfego" in low_n or "trafego" in low_n or "marketing" in low_n) and "ParceiroAgência" in v.name:
+                    venture = v
+                    break
+                if ("academ" in low_n or "escola" in low_n or "contab" in low_n or "pilates" in low_n) and "CobraFácil" in v.name:
+                    venture = v
+                    break
+                if ("restaur" in low_n or "loja" in low_n or "ótica" in low_n or "otica" in low_n) and "TopMapa" in v.name:
+                    venture = v
+                    break
+                if ("ofic" in low_n or "mecân" in low_n or "mecan" in low_n or "auto center" in low_n) and "OficinaZap" in v.name:
                     venture = v
                     break
                 if ("pet" in low_n or "banho" in low_n or "tosa" in low_n or "vet" in low_n) and "PetAgenda" in v.name:
                     venture = v
                     break
-                if ("pizz" in low_n or "hamb" in low_n or "lanch" in low_n) and "ZapPedido" in v.name:
+                if ("pizz" in low_n or "hamb" in low_n or "lanch" in low_n or "açaí" in low_n) and "ZapPedido" in v.name:
                     venture = v
                     break
-                if ("clín" in low_n or "odont" in low_n or "méd" in low_n or "advog" in low_n) and "NexusFlow" in v.name:
+                if ("clín" in low_n or "clin" in low_n or "odont" in low_n or "dentist" in low_n or "méd" in low_n) and "NexusFlow" in v.name:
                     venture = v
                     break
                 if ("barb" in low_n or "salão" in low_n or "salao" in low_n or "estét" in low_n) and "AgendaCorte" in v.name:
@@ -317,12 +332,17 @@ class RealLeadHunter:
             maps_query = urllib.parse.quote(f"{biz_name} {city_clean}")
             maps_url = f"https://www.google.com/maps/search/?api=1&query={maps_query}"
 
+            warm_opener = (
+                f"Olá, pessoal da {biz_name}! Tudo joia? Vi o perfil de vocês aqui em {city_clean}! "
+                f"Quem cuida hoje da parte de agendamentos / atendimento comercial pelo WhatsApp de vocês?"
+            )
+
             pitch = (
                 f"Olá, equipa da {biz_name}! Tudo bem? Vi o perfil de vocês em {city_clean}! "
                 f"Estou liberando na região o *{venture_name}*: nossa IA que atende seus clientes no WhatsApp 24h, "
-                f"agenda/fecha pedidos sozinha e já cobra via Pix sem comissão.\n\n"
+                f"agenda/fecha pedidos sozinha, reativa clientes sumidos e já cobra via Pix sem comissão.\n\n"
                 f"Veja funcionando ao vivo aqui: {venture_url}\n"
-                f"Plano completo por apenas *R$ {price_brl}/mês no Pix*. Posso liberar um teste hoje?"
+                f"Plano completo por apenas *R$ {price_brl}/mês no Pix* (ou teste de 15 dias por R$ 49,90). Posso liberar um teste hoje?"
             )
 
             wa_encoded = urllib.parse.quote(pitch)
@@ -348,6 +368,7 @@ class RealLeadHunter:
                     "venture_name": venture_name,
                     "price_usd": price_usd,
                     "price_brl": price_brl,
+                    "warm_opener": warm_opener,
                     "whatsapp_pitch": pitch,
                     "whatsapp_url": wa_link,
                 }
