@@ -406,8 +406,15 @@ class AutonomousOutreachEngine:
         message: str,
         audio_base64: str = "",
         audio_mime: str = "audio/ogg",
+        image_base64: str = "",
+        image_mime: str = "image/jpeg",
     ) -> str:
+        import urllib.parse
+
         was_audio = False
+        was_image = False
+        is_ceo_handoff = message.startswith("[CEO_HANDOFF_TRIGGER]")
+
         if audio_base64:
             transcribed = await MultiModelLLMGateway.transcribe_whatsapp_audio(
                 db=db,
@@ -424,6 +431,30 @@ class AutonomousOutreachEngine:
                     message=f"🎙️ [Áudio WhatsApp Ouvido] {contact_name}: \"{transcribed[:95]}\"",
                 )
 
+        if image_base64:
+            vision_desc = await MultiModelLLMGateway.analyze_whatsapp_image(
+                db=db,
+                image_base64=image_base64,
+                mime_type=image_mime,
+                caption="" if message == "[FOTO_WHATSAPP]" else message,
+            )
+            if vision_desc:
+                was_image = True
+                message = vision_desc
+                await event_bus.publish(
+                    event_type="WHATSAPP_IMAGE_ANALYZED",
+                    agent_slug="sales-closer",
+                    level="INFO",
+                    message=f"📸 [Foto Analisada Vision] {contact_name}: \"{vision_desc[:95]}\"",
+                )
+                if "[COMPROVANTE_PIX]" in vision_desc:
+                    await EvolutionWhatsAppManager.notify_owner_vip(
+                        f"📸💰 *[CLIENTE ENVIOU FOTO DE COMPROVANTE PIX!]*\n\n"
+                        f"🏪 *Cliente:* {contact_name} (+{phone})\n"
+                        f"🔍 *Leitura IA:* {vision_desc}\n"
+                        f"🛠️ Link do Portal já foi enviado na conversa!"
+                    )
+
         hist_res = await db.execute(
             select(OmnichannelInteraction)
             .where(OmnichannelInteraction.contact_handle == phone)
@@ -431,44 +462,103 @@ class AutonomousOutreachEngine:
             .limit(4)
         )
         history = hist_res.scalars().all()
-        first_warm_reply = len(history) == 1 and history[0].deal_stage == "CONTACTED_AUTO"
+        first_warm_reply = is_ceo_handoff or (len(history) == 1 and history[0].deal_stage == "CONTACTED_AUTO")
 
         ven_res = await db.execute(select(BusinessVenture))
         ventures = ven_res.scalars().all()
         chosen_venture = ventures[0] if ventures else None
-        hist_blob = " ".join(f"{h.inbound_message} {h.agent_response}" for h in history) + " " + message
+        hist_blob = (" ".join(f"{h.inbound_message} {h.agent_response}" for h in history) + " " + message).lower()
         for v in ventures:
-            if v.name.lower() in hist_blob.lower():
+            if v.name.lower() in hist_blob:
                 chosen_venture = v
                 break
+        else:
+            for kw_map, v_match in [
+                (("barb", "salão", "salao", "corte"), "AgendaCorte"),
+                (("ofic", "mecân", "mecan", "carro"), "OficinaZap"),
+                (("pizz", "hamb", "lanch", "delivery"), "ZapPedido"),
+                (("imob", "corretor", "imóv", "imov"), "ImobZap"),
+                (("pet", "tosa", "vet"), "PetAgenda"),
+                (("estética auto", "polimento", "lava"), "AutoEstética"),
+                (("clín", "clin", "odont", "dentist", "méd"), "NexusFlow"),
+            ]:
+                if any(k in hist_blob for k in kw_map):
+                    found_v = next((x for x in ventures if v_match.lower() in x.name.lower()), None)
+                    if found_v:
+                        chosen_venture = found_v
+                        break
 
         ven_name = chosen_venture.name if chosen_venture else "AgendaCorte Pro AI"
         price_usd = chosen_venture.monthly_price_usd if chosen_venture else 19.0
         price_brl = f"{round(price_usd * 5.65, 2):.2f}".replace(".", ",")
+        clean_cname = contact_name.replace("Cliente ", "").strip() or "Sua Empresa"
         pub_url = (
-            f"https://autonomous-empire-os.onrender.com{chosen_venture.public_url}"
-            if chosen_venture
-            else "https://autonomous-empire-os.onrender.com"
+            f"https://autonomous-empire-os.onrender.com/demo?loja={urllib.parse.quote(clean_cname[:45])}"
+            f"&produto={urllib.parse.quote(ven_name)}&preco={price_usd}"
         )
 
+        if was_image and "[COMPROVANTE_PIX]" in message:
+            portal_link = f"https://autonomous-empire-os.onrender.com/meu-robo/vip-{phone[-6:]}"
+            ref_link = f"https://autonomous-empire-os.onrender.com/vitrine?ref={phone[-6:]}"
+            receipt_reply = (
+                f"✅ Recebemos seu comprovante aqui, *{contact_name}*! Muito obrigado pela confiança!\n\n"
+                f"🛠️ Já liberei seu Portal Exclusivo para preencher seus horários, serviços e chave Pix em 1 minuto:\n"
+                f"👉 {portal_link}\n\n"
+                f"🎁 E aqui está seu link Indique & Ganhe (+1 Mês Grátis a cada amigo lojista indicado): {ref_link}"
+            )
+            db.add(
+                OmnichannelInteraction(
+                    id=f"omni-{uuid.uuid4().hex[:10]}",
+                    channel="WHATSAPP_REAL_AUTO",
+                    department="SALES",
+                    contact_name=contact_name[:80],
+                    contact_handle=phone,
+                    inbound_message=f"[📸 Comprovante]: {message[:800]}",
+                    agent_response=receipt_reply,
+                    sentiment="PAID_RECEIPT",
+                    deal_stage="RECEIPT_RECEIVED",
+                    deal_value_usd=0.0,
+                )
+            )
+            await db.commit()
+            return receipt_reply
+
         low_msg = message.lower()
-        has_price_objection = any(kw in low_msg for kw in OBJECTION_KEYWORDS)
-        wants_to_buy = any(kw in low_msg for kw in BUYING_KEYWORDS) or (
-            not first_warm_reply and any(w in low_msg for w in ("bora", "fechado", "quero sim", "pode gerar"))
+        wants_vip_197 = (not is_ceo_handoff) and any(kw in low_msg for kw in VIP_TURNKEY_KEYWORDS)
+        has_price_objection = (not is_ceo_handoff) and (not wants_vip_197) and any(kw in low_msg for kw in OBJECTION_KEYWORDS)
+        wants_to_buy = (not is_ceo_handoff) and (
+            any(kw in low_msg for kw in BUYING_KEYWORDS)
+            or (not first_warm_reply and any(w in low_msg for w in ("bora", "fechado", "quero sim", "pode gerar")))
         )
 
         pix_block = ""
         deal_stage = "IN_NEGOTIATION"
         billed_usd = price_usd
 
-        if has_price_objection:
-            # Isca irresistível de caixa rápido: Ativação Expressa R$ 49,90 (8.8319 * 5.65 = 49.90)
+        if wants_vip_197:
+            billed_usd = 34.8673
+            inv = await PaymentGatewayManager.create_invoice(
+                db=db,
+                provider="ASAAS_PIX",
+                client_name=contact_name[:75],
+                client_email=f"{phone}@whatsapp.com.br",
+                description=f"Setup VIP Chave na Mao {ven_name}",
+                amount_usd=billed_usd,
+            )
+            if inv.pix_copy_paste:
+                pix_block = (
+                    f"\n\n👑 *Setup VIP Chave na Mão ({ven_name} — Entregamos 100% Configurado Hoje + 30 Dias Inclusos por R$ 197,00 no Pix):*\n\n"
+                    f"{inv.pix_copy_paste}\n\n"
+                    f"Assim que confirmar o Pix, nossa engenharia monta tudo com seus serviços e horários hoje mesmo!"
+                )
+                deal_stage = "PIX_VIP_197_SENT"
+        elif has_price_objection:
             billed_usd = 8.8319
             inv = await PaymentGatewayManager.create_invoice(
                 db=db,
                 provider="ASAAS_PIX",
                 client_name=contact_name[:75],
-                client_email="cliente@whatsapp.com.br",
+                client_email=f"{phone}@whatsapp.com.br",
                 description=f"Ativacao {ven_name}",
                 amount_usd=billed_usd,
             )
@@ -484,7 +574,7 @@ class AutonomousOutreachEngine:
                 db=db,
                 provider="ASAAS_PIX",
                 client_name=contact_name[:75],
-                client_email="cliente@whatsapp.com.br",
+                client_email=f"{phone}@whatsapp.com.br",
                 description=f"{ven_name} Mensal",
                 amount_usd=price_usd,
             )
