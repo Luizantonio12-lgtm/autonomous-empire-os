@@ -8,7 +8,7 @@ from packages.agents import (
     Support24hAgent,
 )
 from packages.database.event_bus import event_bus
-from packages.database.models import AgentRegistry, ScheduledJob
+from packages.database.models import AgentRegistry, BusinessVenture, ScheduledJob
 from packages.database.session import AsyncSessionLocal
 from packages.memory import EmpireSemanticMemory
 from packages.payments import PaymentGatewayManager
@@ -134,6 +134,24 @@ async def seed_initial_empire_state() -> None:
     async with AsyncSessionLocal() as db:
         existing = await db.execute(select(AgentRegistry).limit(1))
         if existing.scalar_one_or_none() is not None:
+            # Reidrata os ficheiros estáticos de cada SaaS em /app/deployments caso o container tenha reiniciado usando Postgres Cloud
+            from packages.sandbox_runner import DEPLOYMENTS_ROOT
+
+            ventures = (await db.execute(select(BusinessVenture))).scalars().all()
+            for v in ventures:
+                if v.software_project_id:
+                    out_dir = DEPLOYMENTS_ROOT / v.software_project_id
+                    if not (out_dir / "index.html").exists():
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        bundle = AutonomousVentureBuilder._build_commercial_saas_bundle(
+                            venture_id=v.id,
+                            name=v.name,
+                            niche=v.niche,
+                            tagline=v.tagline,
+                            monthly_price_usd=v.monthly_price_usd,
+                        )
+                        for fname, fcontent in bundle.items():
+                            (out_dir / fname).write_text(fcontent, encoding="utf-8")
             return
 
         for cfg in CORE_AGENTS:
