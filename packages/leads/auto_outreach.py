@@ -2,13 +2,13 @@ import asyncio
 import random
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.event_bus import event_bus
-from packages.database.models import BusinessVenture, OmnichannelInteraction
+from packages.database.models import BusinessVenture, OmnichannelInteraction, PaymentInvoice
 from packages.database.session import AsyncSessionLocal
 from packages.integrations.whatsapp_evolution import EvolutionWhatsAppManager
 from packages.leads.lead_hunter import RealLeadHunter
@@ -200,6 +200,10 @@ class AutonomousOutreachEngine:
 
                 now_br = datetime.now(SAO_PAULO_TZ)
                 in_business_hours = 8 <= now_br.hour <= 20
+                if in_business_hours:
+                    async with AsyncSessionLocal() as db:
+                        await cls.run_abandoned_pix_and_ghost_recovery(db)
+
                 if not in_business_hours and cls._first_connect_batch_done:
                     cls._last_campaign_stats["target_query"] = (
                         "Pausa noturna anti-banimento (retoma às 08h00 BRT) — Closer IA ativo 24h"
@@ -527,3 +531,121 @@ class AutonomousOutreachEngine:
             )
 
         return final_reply
+
+    @classmethod
+    async def run_abandoned_pix_and_ghost_recovery(cls, db: AsyncSession) -> dict:
+        """
+        Recuperador Automático Anti-Vácuo & Pix Pendente (1 único follow-up humano por contato):
+          - Caso A: Cliente pediu Pix há +35 min (e <24h) e ainda não liquidou;
+          - Caso B: Cliente respondeu há +3h (e <36h), tirou dúvida, mas sumiu antes de pedir Pix.
+        """
+        wa_state = await EvolutionWhatsAppManager.get_status(db)
+        if wa_state.get("status") != "CONNECTED":
+            return {"ok": False, "recovered": 0, "reason": "WHATSAPP_NOT_CONNECTED"}
+
+        now_utc = datetime.now(timezone.utc)
+        rows = (
+            await db.execute(
+                select(OmnichannelInteraction)
+                .where(OmnichannelInteraction.channel == "WHATSAPP_REAL_AUTO")
+                .order_by(desc(OmnichannelInteraction.created_at))
+                .limit(250)
+            )
+        ).scalars().all()
+
+        paid_names = set(
+            (
+                await db.execute(
+                    select(PaymentInvoice.client_name).where(PaymentInvoice.status == "PAID")
+                )
+            ).scalars().all()
+        )
+
+        by_phone: dict[str, list[OmnichannelInteraction]] = {}
+        for r in rows:
+            ph = "".join(ch for ch in (r.contact_handle or "") if ch.isdigit())
+            if len(ph) >= 10:
+                by_phone.setdefault(ph, []).append(r)
+
+        recovered_count = 0
+        for phone, history in by_phone.items():
+            if recovered_count >= 2:
+                break
+            stages = {h.deal_stage for h in history}
+            if "FOLLOWUP_PIX_RECOVERY" in stages or "FOLLOWUP_GHOST_RECOVERY" in stages:
+                continue
+
+            latest = history[0]
+            cname = latest.contact_name or "parceiro(a)"
+            if cname in paid_names:
+                continue
+
+            created = latest.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age = now_utc - created
+
+            # Caso A: Pix enviado há 35min..24h sem pagamento confirmado
+            if latest.deal_stage in ("PIX_SENT_AUTO", "PIX_PROMO_49_SENT") and timedelta(minutes=35) <= age <= timedelta(hours=24):
+                msg = (
+                    f"Oi, {cname}! Tudo certinho por aí? 😊 Vi aqui no sistema que a sua ativação via Pix ainda ficou pendente. "
+                    f"Conseguiu copiar o código Copia e Cola direitinho ou quer que eu te ajude a liberar seu acesso agora?"
+                )
+                send_res = await EvolutionWhatsAppManager.send_real_whatsapp(phone, msg)
+                if send_res.get("ok"):
+                    db.add(
+                        OmnichannelInteraction(
+                            id=f"omni-{uuid.uuid4().hex[:10]}",
+                            channel="WHATSAPP_REAL_AUTO",
+                            department="SALES",
+                            contact_name=cname[:80],
+                            contact_handle=phone,
+                            inbound_message="[Follow-up Automático 35min — Pix Pendente]",
+                            agent_response=msg,
+                            sentiment="HIGH_INTENT",
+                            deal_stage="FOLLOWUP_PIX_RECOVERY",
+                            deal_value_usd=latest.deal_value_usd or 0.0,
+                        )
+                    )
+                    await db.commit()
+                    recovered_count += 1
+                    await asyncio.sleep(4)
+                continue
+
+            # Caso B: Cliente respondeu, entrou em negociação, mas deu vácuo há 3h..36h
+            if latest.deal_stage == "IN_NEGOTIATION" and timedelta(hours=3) <= age <= timedelta(hours=36):
+                msg = (
+                    f"Oi, {cname}! Sei que a correria aí na empresa é grande! "
+                    f"Se quiser ver na prática como o nosso robô atende e agenda seus clientes 24h no WhatsApp, "
+                    f"consigo liberar hoje nossa ativação promocional de 15 dias por apenas *R$ 49,90 no Pix* (sem fidelidade). "
+                    f"Quer que eu gere o seu teste agora?"
+                )
+                send_res = await EvolutionWhatsAppManager.send_real_whatsapp(phone, msg)
+                if send_res.get("ok"):
+                    db.add(
+                        OmnichannelInteraction(
+                            id=f"omni-{uuid.uuid4().hex[:10]}",
+                            channel="WHATSAPP_REAL_AUTO",
+                            department="SALES",
+                            contact_name=cname[:80],
+                            contact_handle=phone,
+                            inbound_message="[Follow-up Automático 3h — Recuperação de Vácuo]",
+                            agent_response=msg,
+                            sentiment="FOLLOW_UP",
+                            deal_stage="FOLLOWUP_GHOST_RECOVERY",
+                            deal_value_usd=8.83,
+                        )
+                    )
+                    await db.commit()
+                    recovered_count += 1
+                    await asyncio.sleep(4)
+
+        if recovered_count > 0:
+            await event_bus.publish(
+                event_type="ABANDONED_PIX_RECOVERY_RUN",
+                agent_slug="sales-closer",
+                level="SUCCESS",
+                message=f"♻️ [Recuperador Anti-Vácuo] {recovered_count} follow-up(s) enviados automaticamente no WhatsApp!",
+            )
+        return {"ok": True, "recovered": recovered_count}
+

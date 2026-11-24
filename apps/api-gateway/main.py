@@ -1091,6 +1091,11 @@ async def toggle_outreach_autopilot(payload: AutopilotToggleRequest):
     return {"ok": True, "stats": stats}
 
 
+@app.post("/api/leads/recover-pending")
+async def trigger_abandoned_pix_recovery(db: AsyncSession = Depends(get_db)):
+    return await AutonomousOutreachEngine.run_abandoned_pix_and_ghost_recovery(db)
+
+
 @app.post("/api/webhooks/wa-bridge-inbound")
 async def handle_wa_bridge_inbound(
     payload: WaBridgeInboundRequest,
