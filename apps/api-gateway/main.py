@@ -273,14 +273,21 @@ async def internal_wa_auth_restore(request: Request, db: AsyncSession = Depends(
         raise HTTPException(status_code=403, detail="Loopback only.")
     from packages.database.models import RuntimeVault
 
+    known_res = await db.execute(
+        select(OmnichannelInteraction.contact_handle)
+        .where(OmnichannelInteraction.channel == "WHATSAPP_REAL_AUTO")
+        .limit(400)
+    )
+    known_contacts = list({"".join(c for c in (h or "") if c.isdigit()) for h in known_res.scalars().all() if h})
+
     res = await db.execute(select(RuntimeVault).where(RuntimeVault.key_name == "__INTERNAL_WA_AUTH_BUNDLE__"))
     row = res.scalar_one_or_none()
     if not row or not row.secret_value:
-        return {"ok": False, "files": {}}
+        return {"ok": False, "files": {}, "known_contacts": known_contacts}
     try:
-        return {"ok": True, "files": json.loads(row.secret_value)}
+        return {"ok": True, "files": json.loads(row.secret_value), "known_contacts": known_contacts}
     except Exception:
-        return {"ok": False, "files": {}}
+        return {"ok": False, "files": {}, "known_contacts": known_contacts}
 
 
 @app.get("/vitrine")
@@ -289,6 +296,22 @@ async def serve_live_3s_vitrine():
     if vitrine_path.exists():
         return FileResponse(str(vitrine_path), media_type="text/html")
     raise HTTPException(status_code=404, detail="Vitrine não encontrada.")
+
+
+@app.get("/meu-robo/{invoice_id}")
+async def serve_client_self_service_portal(invoice_id: str):
+    portal_path = GATEWAY_DIR / "client_portal.html"
+    if portal_path.exists():
+        return FileResponse(str(portal_path), media_type="text/html")
+    raise HTTPException(status_code=404, detail="Portal não encontrado.")
+
+
+@app.get("/trickspace")
+async def serve_trickspace_gamer_store():
+    store_path = GATEWAY_DIR / "trickspace_store.html"
+    if store_path.exists():
+        return FileResponse(str(store_path), media_type="text/html")
+    raise HTTPException(status_code=404, detail="Loja TrickSpace não encontrada.")
 
 
 @app.get("/api/dashboard/overview")
@@ -1027,6 +1050,23 @@ class WaBridgeInboundRequest(BaseModel):
     phone: str
     contact_name: str = "Cliente WhatsApp"
     message: str
+    audio_base64: str = ""
+    audio_mime: str = "audio/ogg"
+
+
+class ClientOnboardingConfigRequest(BaseModel):
+    invoice_id: str = "vip"
+    business_name: str
+    whatsapp_phone: str
+    business_hours: str
+    services_and_prices: str
+    merchant_pix_key: str = ""
+    bot_tone: str = "Simpático, acolhedor e direto"
+
+
+class TrickSpaceCheckoutRequest(BaseModel):
+    player_name: str
+    whatsapp_phone: str
 
 
 @app.post("/api/leads/hunt")
@@ -1106,8 +1146,109 @@ async def handle_wa_bridge_inbound(
         phone=payload.phone,
         contact_name=payload.contact_name,
         message=payload.message,
+        audio_base64=payload.audio_base64,
+        audio_mime=payload.audio_mime,
     )
     return {"ok": True, "auto_reply": reply}
+
+
+@app.post("/api/onboarding/configure")
+async def save_client_bot_onboarding(
+    payload: ClientOnboardingConfigRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    import re
+    from packages.integrations.whatsapp_evolution import EvolutionWhatsAppManager
+
+    digits = re.sub(r"\D", "", payload.whatsapp_phone)
+    if len(digits) in (10, 11):
+        digits = "55" + digits
+    ref_code = (payload.invoice_id[-6:] if len(payload.invoice_id) >= 6 else uuid.uuid4().hex[:6]).upper()
+    base_url = f"{request.url.scheme}://{request.url.netloc}"
+    if "127.0.0.1" in base_url or "localhost" in base_url:
+        base_url = "https://autonomous-empire-os.onrender.com"
+    referral_url = f"{base_url}/vitrine?ref={ref_code}"
+
+    cfg_text = (
+        f"Empresa: {payload.business_name} | WhatsApp: {digits} | Horário: {payload.business_hours} | "
+        f"Serviços/Preços: {payload.services_and_prices} | Pix Loja: {payload.merchant_pix_key} | "
+        f"Tom: {payload.bot_tone} | Código Indicação: {ref_code}"
+    )
+    await EmpireSemanticMemory.store_memory(
+        db=db,
+        namespace="CLIENT_BOT_CONFIG",
+        source_agent="support-24h",
+        title=f"Configuração Self-Service: {payload.business_name}",
+        content=cfg_text[:1500],
+    )
+
+    await EvolutionWhatsAppManager.notify_owner_vip(
+        f"🛠️🚀 *[NOVO CLIENTE CONFIGUROU O ROBÔ SOZINHO!]*\n\n"
+        f"🏪 *Empresa:* {payload.business_name}\n"
+        f"📱 *WhatsApp:* +{digits}\n"
+        f"🕒 *Horários:* {payload.business_hours}\n"
+        f"📋 *Serviços/Preços:* {payload.services_and_prices[:300]}\n"
+        f"💳 *Chave Pix dele:* {payload.merchant_pix_key or 'Não informada'}\n"
+        f"🎁 *Código Indicação dele:* `{ref_code}`"
+    )
+    return {"ok": True, "ref_code": ref_code, "referral_url": referral_url}
+
+
+@app.post("/api/trickspace/checkout-pix")
+async def create_trickspace_pix_checkout(
+    payload: TrickSpaceCheckoutRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    import re
+    from packages.integrations.whatsapp_evolution import EvolutionWhatsAppManager
+
+    digits = re.sub(r"\D", "", payload.whatsapp_phone)
+    if len(digits) in (10, 11):
+        digits = "55" + digits
+    # R$ 19,90 -> 19.90 / 5.65 = 3.5221 USD
+    inv = await PaymentGatewayManager.create_invoice(
+        db=db,
+        provider="ASAAS_PIX",
+        client_name=payload.player_name[:75],
+        client_email=f"{digits}@whatsapp.com.br",
+        description="TrickSpace ZeroLag v2.6 Pro Vitalicio",
+        amount_usd=3.5221,
+    )
+    await EvolutionWhatsAppManager.notify_owner_vip(
+        f"🎮🔔 *[GAMER GEROU PIX R$ 19,90 • TRICKSPACE PRO!]*\n\n"
+        f"🕹️ *Jogador:* {payload.player_name} (+{digits})\n"
+        f"🧾 *Fatura:* {inv.id}\n"
+        f"⚡ Assim que ele pagar no banco, o sistema envia o APK + Chave VIP no WhatsApp dele sozinho!"
+    )
+    return {
+        "ok": True,
+        "invoice_id": inv.id,
+        "brl_amount": "19,90",
+        "pix_qr_svg": inv.pix_qr_svg,
+        "pix_copy_paste": inv.pix_copy_paste,
+    }
+
+
+@app.get("/api/trickspace/status/{invoice_id}")
+async def check_trickspace_invoice_status(invoice_id: str, db: AsyncSession = Depends(get_db)):
+    res = await db.execute(select(PaymentInvoice).where(PaymentInvoice.id == invoice_id))
+    inv = res.scalar_one_or_none()
+    if not inv:
+        raise HTTPException(status_code=404, detail="Fatura não encontrada.")
+    is_paid = inv.status == "PAID"
+    code_tag = inv.id[-6:].upper()
+    return {
+        "ok": True,
+        "invoice_id": inv.id,
+        "paid": is_paid,
+        "pro_key": f"TSPRO-{code_tag}-VIP" if is_paid else "",
+        "download_url": (
+            "https://github.com/Luizantonio12-lgtm/autonomous-empire-os/releases/download/v3.0-downloads/TrickSpace-ZeroLag-v2.6.apk"
+            if is_paid
+            else ""
+        ),
+    }
 
 
 @app.post("/api/system/reset-real-mode")

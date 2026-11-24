@@ -262,6 +262,8 @@ class PaymentGatewayManager:
         )
 
         try:
+            import re
+            from packages.database.models import OmnichannelInteraction
             from packages.integrations.whatsapp_evolution import EvolutionWhatsAppManager
 
             brl_paid = f"{round(inv.amount_usd * 5.65, 2):.2f}".replace(".", ",")
@@ -272,6 +274,50 @@ class PaymentGatewayManager:
                 f"📦 *Descrição:* {inv.description}\n\n"
                 f"✅ Pagamento conciliado no Asaas e somado ao Caixa Real do seu Empire OS!"
             )
+
+            # Entrega automática pós-Pix no WhatsApp do comprador (Ideia #3, #4 e #5)!
+            buyer_phone = ""
+            email_prefix = (inv.client_email or "").split("@")[0]
+            email_digits = re.sub(r"\D", "", email_prefix)
+            if len(email_digits) >= 10:
+                buyer_phone = email_digits
+            else:
+                om_res = await db.execute(
+                    select(OmnichannelInteraction)
+                    .where(OmnichannelInteraction.contact_name == inv.client_name)
+                    .order_by(OmnichannelInteraction.created_at.desc())
+                    .limit(1)
+                )
+                om = om_res.scalar_one_or_none()
+                if om and om.contact_handle:
+                    d = re.sub(r"\D", "", om.contact_handle)
+                    if len(d) >= 10:
+                        buyer_phone = d
+
+            if buyer_phone:
+                code_tag = inv.id[-6:].upper()
+                if "trickspace" in (inv.description or "").lower():
+                    pro_key = f"TSPRO-{code_tag}-VIP"
+                    await EvolutionWhatsAppManager.send_real_whatsapp(
+                        buyer_phone,
+                        f"🎮⚡ *[TRICKSPACE ZEROLAG v2.6 PRO LIBERADO!]*\n\n"
+                        f"Pagamento Pix confirmado, *{inv.client_name}*!\n\n"
+                        f"🔑 *Sua Chave Pro Vitalícia:* `{pro_key}`\n"
+                        f"📥 *Baixar APK Oficial (1 Toque):*\n"
+                        f"https://github.com/Luizantonio12-lgtm/autonomous-empire-os/releases/download/v3.0-downloads/TrickSpace-ZeroLag-v2.6.apk\n\n"
+                        f"Instale, toque em '🔋 Blindar Bateria' e ative a Bolinha Flutuante. Bom jogo! 🔥",
+                    )
+                else:
+                    portal_url = f"https://autonomous-empire-os.onrender.com/meu-robo/{inv.id}"
+                    ref_url = f"https://autonomous-empire-os.onrender.com/vitrine?ref={code_tag}"
+                    await EvolutionWhatsAppManager.send_real_whatsapp(
+                        buyer_phone,
+                        f"🎉🚀 *[PAGAMENTO CONFIRMADO • SEU ROBÔ IA ESTÁ LIBERADO!]*\n\n"
+                        f"Seja muito bem-vindo(a), *{inv.client_name}*! Configure agora em 1 minuto os horários, serviços/preços e chave Pix da sua empresa no seu Portal Exclusivo:\n"
+                        f"👉 {portal_url}\n\n"
+                        f"🎁 *Bônus Indique & Ganhe 1 Mês Grátis:* mande seu link abaixo para 1 amigo dono de negócio — se ele ativar, você ganha +30 dias grátis:\n"
+                        f"{ref_url}",
+                    )
         except Exception:
             pass
 

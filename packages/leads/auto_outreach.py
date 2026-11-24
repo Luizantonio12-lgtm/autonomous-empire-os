@@ -19,20 +19,19 @@ from packages.payments import PaymentGatewayManager
 SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 
 BUYING_KEYWORDS = (
-    "quero",
+    "quero testar",
+    "quero assinar",
+    "quero ativar",
     "assinar",
     "ativar",
     "fechar",
     "pix",
-    "testar",
-    "teste",
-    "sim",
-    "bora",
-    "pode mandar",
+    "libera",
     "pode liberar",
     "como pago",
-    "manda o link",
-    "tenho interesse",
+    "manda o pix",
+    "gera o pix",
+    "gera o teste",
 )
 
 OBJECTION_KEYWORDS = (
@@ -392,7 +391,26 @@ class AutonomousOutreachEngine:
         phone: str,
         contact_name: str,
         message: str,
+        audio_base64: str = "",
+        audio_mime: str = "audio/ogg",
     ) -> str:
+        was_audio = False
+        if audio_base64:
+            transcribed = await MultiModelLLMGateway.transcribe_whatsapp_audio(
+                db=db,
+                audio_base64=audio_base64,
+                mime_type=audio_mime,
+            )
+            if transcribed:
+                message = transcribed
+                was_audio = True
+                await event_bus.publish(
+                    event_type="WHATSAPP_AUDIO_TRANSCRIBED",
+                    agent_slug="sales-closer",
+                    level="INFO",
+                    message=f"🎙️ [Áudio WhatsApp Ouvido] {contact_name}: \"{transcribed[:95]}\"",
+                )
+
         hist_res = await db.execute(
             select(OmnichannelInteraction)
             .where(OmnichannelInteraction.contact_handle == phone)
@@ -400,6 +418,7 @@ class AutonomousOutreachEngine:
             .limit(4)
         )
         history = hist_res.scalars().all()
+        first_warm_reply = len(history) == 1 and history[0].deal_stage == "CONTACTED_AUTO"
 
         ven_res = await db.execute(select(BusinessVenture))
         ventures = ven_res.scalars().all()
@@ -421,7 +440,9 @@ class AutonomousOutreachEngine:
 
         low_msg = message.lower()
         has_price_objection = any(kw in low_msg for kw in OBJECTION_KEYWORDS)
-        wants_to_buy = any(kw in low_msg for kw in BUYING_KEYWORDS)
+        wants_to_buy = any(kw in low_msg for kw in BUYING_KEYWORDS) or (
+            not first_warm_reply and any(w in low_msg for w in ("bora", "fechado", "quero sim", "pode gerar"))
+        )
 
         pix_block = ""
         deal_stage = "IN_NEGOTIATION"
@@ -468,26 +489,42 @@ class AutonomousOutreachEngine:
             task_id=None,
             system_prompt=(
                 f"És o consultor comercial humano e simpático do SaaS '{ven_name}' (R$ {price_brl}/mês no Pix, sem fidelidade). "
-                "Responde no WhatsApp em português do Brasil natural, curto (máximo 3 frases diretas), tirando a dúvida do cliente "
+                + ("Acabaste de ouvir o áudio de voz do cliente! Confirma naturalmente que ouviste o áudio dele. " if was_audio else "")
                 + (
-                    "e avisando que liberaste uma ativação promocional de 15 dias por apenas R$ 49,90 com o Pix Copia e Cola logo abaixo."
-                    if has_price_objection and pix_block
+                    f"Entrega o Diagnóstico Rápido prometido: dá Nota 6.8/10 hoje (porque fora do horário comercial e no pico o cliente espera e vai pro concorrente, além de clientes antigos ficarem +90 dias sem retorno) e mostra que com o {ven_name} sobe para Nota 10/10 atendendo 24h, agendando e cobrando no Pix sozinho. Inclui o link da demonstração {pub_url} e pergunta se podes liberar o teste VIP de 15 dias por apenas R$ 49,90 (responda 'QUERO TESTAR')."
+                    if first_warm_reply and not pix_block
                     else (
-                        "e avisando que já geraste o Pix Copia e Cola logo abaixo para ativar agora."
-                        if pix_block
-                        else f"e perguntando se podes liberar a ativação promocional hoje (temos teste de 15 dias por R$ 49,90 ou plano completo R$ {price_brl}/mês) com demonstração em {pub_url}."
+                        "Responde no WhatsApp em português do Brasil natural, curto (máximo 3 frases diretas), tirando a dúvida do cliente "
+                        + (
+                            "e avisando que liberaste uma ativação promocional de 15 dias por apenas R$ 49,90 com o Pix Copia e Cola logo abaixo."
+                            if has_price_objection and pix_block
+                            else (
+                                "e avisando que já geraste o Pix Copia e Cola logo abaixo para ativar agora."
+                                if pix_block
+                                else f"e perguntando se podes liberar a ativação promocional hoje (teste de 15 dias por R$ 49,90 ou plano completo R$ {price_brl}/mês — basta responder 'QUERO TESTAR') com demonstração em {pub_url}."
+                            )
+                        )
                     )
                 )
             ),
-            user_prompt=f"Cliente ({contact_name}) respondeu no WhatsApp: '{message}'",
+            user_prompt=f"Cliente ({contact_name}) respondeu no WhatsApp" + (" [POR ÁUDIO DE VOZ]" if was_audio else "") + f": '{message}'",
             operation_label=f"Closer WhatsApp Autónomo ({contact_name})",
             strategy="MARGIN_OPTIMIZED",
             local_fallback_text=(
-                f"Show, {contact_name}! Com o *{ven_name}* sua loja atende e vende no automático 24h pelo WhatsApp."
-                + (
-                    ""
-                    if pix_block
-                    else f" Posso liberar nossa ativação promocional de 15 dias por R$ 49,90 no Pix para você testar hoje?"
+                (
+                    f"📊 *Diagnóstico Rápido — {contact_name}:* Hoje sua nota de velocidade no WhatsApp é *6.8/10* (clientes à noite ou no horário de pico acabam fechando no concorrente). "
+                    f"Com o *{ven_name}* sua empresa vai para *10/10*: nossa IA atende 24h, agenda e cobra no Pix sozinha!\n\n"
+                    f"Veja ao vivo: {pub_url}\n"
+                    f"Posso liberar nosso teste VIP de 15 dias por apenas *R$ 49,90 no Pix*? (Responda *QUERO TESTAR*)"
+                )
+                if first_warm_reply and not pix_block
+                else (
+                    f"Show, {contact_name}! Com o *{ven_name}* sua loja atende e vende no automático 24h pelo WhatsApp."
+                    + (
+                        ""
+                        if pix_block
+                        else " Posso liberar nossa ativação promocional de 15 dias por R$ 49,90 no Pix para você testar hoje? (Responda *QUERO TESTAR*)"
+                    )
                 )
             ),
         )
@@ -500,7 +537,7 @@ class AutonomousOutreachEngine:
             department="SALES",
             contact_name=contact_name[:80],
             contact_handle=phone,
-            inbound_message=message[:1000],
+            inbound_message=(f"[🎙️ Áudio]: {message}" if was_audio else message)[:1000],
             agent_response=final_reply[:1800],
             sentiment="BUYING_INTENT" if (wants_to_buy or has_price_objection) else "QUESTION",
             deal_stage=deal_stage,

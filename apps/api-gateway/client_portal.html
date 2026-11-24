@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Portal de Ativação — Configure Seu Robô IA em 1 Minuto</title>
+  <style>
+    :root { --bg:#060a14; --card:#0f172a; --neon:#00f5a0; --cyan:#00d9f5; --gold:#ffd000; --text:#f8fafc; --muted:#94a3b8; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:radial-gradient(circle at top,#102342 0%,var(--bg) 60%); color:var(--text); padding:24px 16px 56px; min-height:100vh; }
+    .wrap { max-width:620px; margin:0 auto; }
+    .pill { display:inline-block; padding:6px 14px; border-radius:999px; background:rgba(0,245,160,0.14); border:1px solid rgba(0,245,160,0.35); color:var(--neon); font-size:12px; font-weight:800; margin-bottom:12px; }
+    h1 { font-size:26px; line-height:1.2; margin-bottom:8px; }
+    p.sub { color:var(--muted); font-size:14px; margin-bottom:20px; }
+    .card { background:var(--card); border:1px solid rgba(255,255,255,0.1); border-radius:18px; padding:20px; margin-bottom:18px; }
+    label { display:block; font-size:12.5px; font-weight:700; color:#cbd5e1; margin:12px 0 5px; }
+    input, textarea, select { width:100%; padding:12px 13px; border-radius:11px; border:1px solid rgba(255,255,255,0.15); background:#070c18; color:#fff; font-size:14px; outline:none; }
+    textarea { min-height:84px; resize:vertical; }
+    input:focus, textarea:focus, select:focus { border-color:var(--neon); }
+    .btn { width:100%; margin-top:16px; padding:15px; border:none; border-radius:12px; background:linear-gradient(90deg,var(--neon),var(--cyan)); color:#03140e; font-size:15px; font-weight:900; cursor:pointer; }
+    .ref-box { display:none; background:linear-gradient(135deg,rgba(255,208,0,0.15),rgba(0,245,160,0.12)); border:1.5px solid var(--gold); border-radius:18px; padding:20px; margin-top:16px; }
+    .ref-box h3 { color:var(--gold); font-size:18px; margin-bottom:6px; }
+    .ref-btn { display:block; text-align:center; text-decoration:none; margin-top:12px; padding:13px; border-radius:11px; background:#25D366; color:#041c0d; font-weight:900; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <span class="pill">✅ ACESSO LIBERADO • CONFIGURAÇÃO EXPRESSA</span>
+    <h1>Configure o Robô IA da Sua Empresa em 1 Minuto</h1>
+    <p class="sub">Preencha abaixo como sua empresa funciona. Nossos agentes já personalizam seu atendimento 24h automaticamente!</p>
+
+    <div class="card" id="formCard">
+      <form id="cfgForm">
+        <label>Nome da Sua Empresa *</label>
+        <input id="cName" required placeholder="Ex: Clínica Sorriso / Oficina Silva" />
+
+        <label>WhatsApp Oficial da Empresa (com DDD) *</label>
+        <input id="cPhone" required type="tel" placeholder="Ex: 16999887766" />
+
+        <label>Horário de Funcionamento Humano *</label>
+        <input id="cHours" required placeholder="Ex: Seg a Sex das 08h às 18h, Sáb 08h às 12h" />
+
+        <label>Principais Serviços / Cardápio e Preços Médios *</label>
+        <textarea id="cServices" required placeholder="Ex: Limpeza R$ 150, Clareamento R$ 450 / Corte R$ 40, Barba R$ 30..."></textarea>
+
+        <label>Sua Chave Pix (para o robô cobrar seus clientes)</label>
+        <input id="cPix" placeholder="Ex: CNPJ, celular ou e-mail Pix da sua loja" />
+
+        <label>Estilo de Conversa do Robô</label>
+        <select id="cTone">
+          <option value="Simpático, acolhedor e direto">😊 Simpático, acolhedor e direto (Recomendado)</option>
+          <option value="Executivo e formal">👔 Executivo e mais formal</option>
+          <option value="Rápido e energético para vendas">⚡ Rápido e focado em fechamento imediato</option>
+        </select>
+
+        <button type="submit" class="btn" id="saveBtn">🚀 SALVAR E ATIVAR MEU ROBÔ 24H</button>
+      </form>
+    </div>
+
+    <div class="ref-box" id="successBox">
+      <h3>🎉 Tudo Pronto! Seu Robô Está Sendo Ativado!</h3>
+      <p style="font-size:14px;color:#e2e8f0;margin-bottom:12px;">Nossa engenharia IA já recebeu suas regras de horários, serviços e chave Pix e vai te chamar no WhatsApp com seu atendimento ativo!</p>
+      <hr style="border:none;border-top:1px solid rgba(255,255,255,0.15);margin:14px 0;" />
+      <h3>🎁 Ganhe +1 Mês 100% Grátis (Indique 1 Amigo Lojista!)</h3>
+      <p style="font-size:13.5px;color:#cbd5e1;">Conhece algum amigo que tem clínica, barbearia, oficina, loja ou delivery? Se 1 amigo ativar pelo seu link abaixo, você ganha <strong>+30 dias grátis</strong> automaticamente:</p>
+      <input id="refLinkInput" readonly style="margin-top:10px;font-size:12.5px;color:#a7f3d0;border-color:#10b981;" />
+      <a id="waShareBtn" href="#" target="_blank" class="ref-btn">📲 MANDAR CONVITE NO WHATSAPP DE UM AMIGO</a>
+    </div>
+  </div>
+
+  <script>
+    const invId = window.location.pathname.split("/").pop() || "vip";
+    const form = document.getElementById("cfgForm");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById("saveBtn");
+      btn.disabled = true;
+      btn.textContent = "⏳ Salvando configuração na nuvem...";
+      try {
+        const resp = await fetch("/api/onboarding/configure", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            invoice_id: invId,
+            business_name: document.getElementById("cName").value.trim(),
+            whatsapp_phone: document.getElementById("cPhone").value.trim(),
+            business_hours: document.getElementById("cHours").value.trim(),
+            services_and_prices: document.getElementById("cServices").value.trim(),
+            merchant_pix_key: document.getElementById("cPix").value.trim(),
+            bot_tone: document.getElementById("cTone").value
+          })
+        });
+        const data = await resp.json();
+        const refUrl = data.referral_url || (window.location.origin + "/vitrine?ref=" + invId.slice(-6).toUpperCase());
+        document.getElementById("formCard").style.display = "none";
+        const sBox = document.getElementById("successBox");
+        sBox.style.display = "block";
+        document.getElementById("refLinkInput").value = refUrl;
+        const msg = encodeURIComponent("Cara, coloquei uma IA que atende meus clientes 24h e cobra no Pix sozinha no WhatsApp! Testa em 3 segundos no seu celular aqui: " + refUrl);
+        document.getElementById("waShareBtn").href = "https://wa.me/?text=" + msg;
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "🚀 SALVAR E ATIVAR MEU ROBÔ 24H";
+        alert("Erro de conexão, tente novamente.");
+      }
+    });
+  </script>
+</body>
+</html>

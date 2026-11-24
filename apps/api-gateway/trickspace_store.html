@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrickSpace ZeroLag v2.6 Pro — Bolinha Flutuante & HUD 120 FPS</title>
+  <style>
+    :root { --bg:#05070f; --card:#0d1324; --neon:#00f5a0; --cyan:#00d9f5; --gold:#ffd000; --text:#f8fafc; --muted:#94a3b8; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:radial-gradient(circle at top,#141038 0%,var(--bg) 58%); color:var(--text); padding:24px 16px 60px; min-height:100vh; }
+    .wrap { max-width:580px; margin:0 auto; }
+    .tag { display:inline-block; padding:6px 14px; border-radius:999px; background:rgba(0,245,160,0.13); border:1px solid rgba(0,245,160,0.4); color:var(--neon); font-size:12px; font-weight:800; margin-bottom:12px; }
+    h1 { font-size:clamp(25px,5.5vw,34px); line-height:1.15; margin-bottom:10px; background:linear-gradient(90deg,#fff,var(--neon),var(--cyan)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+    .lead { color:var(--muted); font-size:14.5px; margin-bottom:20px; }
+    .feats { display:grid; gap:10px; margin-bottom:20px; }
+    .feat { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:12px 14px; font-size:13.5px; }
+    .feat strong { color:var(--neon); }
+    .box { background:linear-gradient(160deg,#111a33,#0a1020); border:1.5px solid var(--neon); border-radius:20px; padding:22px; box-shadow:0 16px 40px rgba(0,245,160,0.14); }
+    .price-row { display:flex; align-items:baseline; gap:10px; margin-bottom:14px; }
+    .old { text-decoration:line-through; color:#64748b; font-size:15px; }
+    .now { font-size:32px; font-weight:900; color:var(--neon); }
+    .once { font-size:12px; color:var(--gold); font-weight:800; }
+    input { width:100%; padding:13px 14px; border-radius:11px; border:1px solid rgba(255,255,255,0.16); background:#060a15; color:#fff; font-size:14.5px; margin-bottom:10px; outline:none; }
+    input:focus { border-color:var(--neon); }
+    .btn { width:100%; padding:15px; border:none; border-radius:12px; background:linear-gradient(90deg,var(--neon),var(--cyan)); color:#03150e; font-size:15px; font-weight:900; cursor:pointer; }
+    #pixArea { display:none; text-align:center; margin-top:16px; padding-top:16px; border-top:1px solid rgba(255,255,255,0.12); }
+    #unlockedArea { display:none; text-align:center; margin-top:16px; padding:18px; border-radius:15px; background:rgba(0,245,160,0.14); border:1.5px solid var(--neon); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div style="text-align:center;">
+      <span class="tag">🎮 ANDROID 8 AO 15 • 100% ANTI-BAN (SEM MEXER NA MEMÓRIA)</span>
+      <h1>TrickSpace ZeroLag v2.6 Pro</h1>
+      <p class="lead">Bolinha Flutuante estilo Game Space + Botão Trick Auxiliar Trava/Destrava + Blindagem Anti-Fechamento Xiaomi/Samsung + Perfis Zero-Lag.</p>
+    </div>
+
+    <div class="feats">
+      <div class="feat">🎯 <strong>Botão Trick Flutuante (🔓 Mover / 🔒 Travar):</strong> posicione em cima do botão de tiro e trave com 100% pass-through (zero bloqueio de toque).</div>
+      <div class="feat">🔋 <strong>Blindagem de 2º Plano v2.6:</strong> a bolinha nunca fecha sozinha no meio da ranqueada em Xiaomi, Redmi, Poco, Samsung ou Motorola.</div>
+      <div class="feat">⚡ <strong>Liberação Instantânea 24h:</strong> pagou no Pix, a tela libera o APK + sua Chave VIP na hora e manda no seu WhatsApp!</div>
+    </div>
+
+    <div class="box">
+      <div class="price-row">
+        <span class="old">De R$ 49,90</span>
+        <span class="now">R$ 19,90</span>
+        <span class="once">PAGAMENTO ÚNICO • VITALÍCIO</span>
+      </div>
+
+      <form id="tsForm">
+        <input id="pName" required placeholder="Seu Nome ou Nick no jogo" />
+        <input id="pPhone" required type="tel" placeholder="Seu WhatsApp com DDD (p/ receber o APK)" />
+        <button type="submit" class="btn" id="genPixBtn">⚡ GERAR PIX R$ 19,90 E LIBERAR APK AGORA</button>
+      </form>
+
+      <div id="pixArea">
+        <strong style="color:var(--neon);font-size:14.5px;">📲 Escaneie ou Copie o Pix Oficial (R$ 19,90)</strong>
+        <div id="qrBox" style="margin:12px auto;display:flex;justify-content:center;"></div>
+        <input id="pixCopyInput" readonly style="font-size:11.5px;color:#a7f3d0;border-color:#10b981;" />
+        <button type="button" class="btn" id="copyBtn" style="margin-bottom:8px;">📋 COPIAR PIX COPIA E COLA</button>
+        <div style="font-size:12px;color:var(--gold);" id="pollText">⏳ Aguardando confirmação automática do banco (atualiza a cada 4s)...</div>
+      </div>
+
+      <div id="unlockedArea">
+        <h3 style="color:var(--neon);margin-bottom:8px;">🎉 PAGAMENTO CONFIRMADO! ACESSO LIBERADO!</h3>
+        <p style="font-size:13.5px;margin-bottom:10px;">Sua Chave VIP Vitalícia: <strong id="proKeyOut" style="color:var(--gold);"></strong></p>
+        <a id="apkDlBtn" href="#" class="btn" style="display:block;text-decoration:none;">📥 BAIXAR TRICKSPACE-ZEROLAG-v2.6.APK</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let pollTimer = null;
+    document.getElementById("tsForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById("genPixBtn");
+      btn.disabled = true;
+      btn.textContent = "⏳ Gerando QR Code Pix Oficial...";
+      try {
+        const resp = await fetch("/api/trickspace/checkout-pix", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            player_name: document.getElementById("pName").value.trim(),
+            whatsapp_phone: document.getElementById("pPhone").value.trim()
+          })
+        });
+        const data = await resp.json();
+        if (data && data.ok) {
+          document.getElementById("tsForm").style.display = "none";
+          document.getElementById("pixArea").style.display = "block";
+          document.getElementById("qrBox").innerHTML = data.pix_qr_svg || "";
+          document.getElementById("pixCopyInput").value = data.pix_copy_paste || "";
+          document.getElementById("copyBtn").onclick = () => {
+            navigator.clipboard.writeText(data.pix_copy_paste || "");
+            document.getElementById("copyBtn").textContent = "✅ PIX COPIADO! PAGUE NO SEU BANCO";
+          };
+          pollTimer = setInterval(async () => {
+            try {
+              const st = await (await fetch("/api/trickspace/status/" + data.invoice_id)).json();
+              if (st && st.paid) {
+                clearInterval(pollTimer);
+                document.getElementById("pixArea").style.display = "none";
+                document.getElementById("unlockedArea").style.display = "block";
+                document.getElementById("proKeyOut").textContent = st.pro_key;
+                document.getElementById("apkDlBtn").href = st.download_url;
+              }
+            } catch (_) {}
+          }, 4000);
+        }
+      } catch (err) {
+        alert("Erro ao gerar Pix, tente novamente.");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "⚡ GERAR PIX R$ 19,90 E LIBERAR APK AGORA";
+      }
+    });
+  </script>
+</body>
+</html>

@@ -261,11 +261,18 @@
       <p>Pare de perder clientes porque o lojista demora para responder os leads dos seus anúncios. Coloque nossa IA nos seus clientes e receba 30% todo mês!</p>
       <a class="partner-btn" data-venture="ParceiroAgência" href="https://wa.me/5516993862008?text=Quero%20ser%20ParceiroAg%C3%AAncia%2030%25" target="_blank">Acessar Portal ParceiroAgência 30% →</a>
     </div>
+
+    <div class="partner-banner" style="border-color:rgba(0,217,245,0.4);background:linear-gradient(135deg,rgba(0,217,245,0.12),rgba(20,16,56,0.6));">
+      <h3 style="color:#00d9f5;">🎮 Joga no Android? Conheça o TrickSpace ZeroLag v2.6 Pro!</h3>
+      <p>Bolinha Flutuante estilo Game Space + Botão Trick Trava/Destrava + Blindagem Anti-Fechamento por apenas R$ 19,90 vitalício no Pix com entrega imediata!</p>
+      <a class="partner-btn" style="background:#00d9f5;color:#03151a;" href="/trickspace">Abrir Loja Gamer TrickSpace →</a>
+    </div>
   </div>
 
   <script>
     const API_BASE = (window.location.origin && window.location.origin.startsWith("http")) ? window.location.origin : "https://autonomous-empire-os.onrender.com";
     const OWNER_WA = "5516993862008";
+    const REF_CODE = new URLSearchParams(window.location.search).get("ref") || "";
 
     // Atualiza dinamicamente os links dos 9 cards com as URLs reais ativas no servidor!
     fetch(`${API_BASE}/api/dashboard/overview`)
@@ -301,18 +308,19 @@
         return;
       }
 
-      const fallbackText = encodeURIComponent(`Olá! Sou da empresa *${biz}* (${digits}) e quero testar o *${ventureName}* ao vivo agora!`);
+      const bizLabel = REF_CODE ? `${biz} [Indicado:${REF_CODE}]` : biz;
+      const fallbackText = encodeURIComponent(`Olá! Sou da empresa *${bizLabel}* (${digits}) e quero testar o *${ventureName}* ao vivo agora!`);
       const fallbackWaUrl = `https://wa.me/${OWNER_WA}?text=${fallbackText}`;
 
       btn.disabled = true;
       btn.textContent = "⏳ Disparando IA no seu WhatsApp...";
       try {
-        const msg = `⚡ Olá, equipe da *${biz}*! Aqui é a IA ao vivo do *${ventureName}*! Viu como respondi em menos de 3 segundos? É exatamente assim que vamos atender seus clientes 24h, agendar e fechar no Pix! Responda 'QUERO TESTAR' aqui mesmo para liberar sua condição VIP de 15 dias!`;
+        const msg = `⚡ Olá, equipe da *${biz}*! Aqui é a IA ao vivo do *${ventureName}*! Viu como respondi em menos de 3 segundos? É exatamente assim que vamos atender seus clientes 24h, agendar e fechar no Pix!` + (REF_CODE ? ` (Convite VIP #${REF_CODE} ativado!)` : "") + ` Responda 'QUERO TESTAR' aqui mesmo para liberar sua condição VIP de 15 dias!`;
         const resp = await fetch(`${API_BASE}/api/leads/send-one`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            business_name: biz,
+            business_name: bizLabel,
             phone_digits: digits,
             message: msg,
             venture_name: ventureName,

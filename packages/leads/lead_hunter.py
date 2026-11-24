@@ -332,10 +332,17 @@ class RealLeadHunter:
             maps_query = urllib.parse.quote(f"{biz_name} {city_clean}")
             maps_url = f"https://www.google.com/maps/search/?api=1&query={maps_query}"
 
-            warm_opener = (
-                f"Olá, pessoal da {biz_name}! Tudo joia? Vi o perfil de vocês aqui em {city_clean}! "
-                f"Quem cuida hoje da parte de agendamentos / atendimento comercial pelo WhatsApp de vocês?"
-            )
+            if idx % 2 == 0:
+                warm_opener = (
+                    f"Olá, pessoal da {biz_name}! Tudo joia? Fizemos um diagnóstico rápido (nota 0 a 10) das empresas de {niche_clean} "
+                    f"aqui em {city_clean} e vimos 2 detalhes no atendimento pelo WhatsApp fora de horário que fazem clientes irem para o concorrente. "
+                    f"Posso te mandar o resumo gratuito aqui?"
+                )
+            else:
+                warm_opener = (
+                    f"Oi, equipe da {biz_name}! Tudo bem por aí? Vi o perfil de vocês aqui em {city_clean}! "
+                    f"Quem cuida hoje dos agendamentos/pedidos no WhatsApp? Preparei uma avaliação rápida (0 a 10) de como dobrar os fechamentos automáticos de vocês, posso mandar aqui?"
+                )
 
             pitch = (
                 f"Olá, equipa da {biz_name}! Tudo bem? Vi o perfil de vocês em {city_clean}! "

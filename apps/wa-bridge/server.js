@@ -8,6 +8,7 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   fetchLatestWaWebVersion,
+  downloadMediaMessage,
   DisconnectReason,
   Browsers,
 } = require('@whiskeysockets/baileys');
@@ -312,11 +313,15 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
         const remoteJid = msg.key.remoteJid || '';
         if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
 
-        const text = extractMessageText(msg);
-        if (!text) continue;
-
         const senderDigits = remoteJid.split('@')[0].split(':')[0];
-        const low = text.toLowerCase();
+        const audioMsg = msg.message?.audioMessage || msg.message?.ephemeralMessage?.message?.audioMessage || null;
+        let text = extractMessageText(msg);
+        let audioBase64 = '';
+        let audioMime = 'audio/ogg';
+
+        if (!text && !audioMsg) continue;
+
+        const low = (text || '').toLowerCase();
         const mentionsProduct =
           low.includes('agendacorte') ||
           low.includes('zappedido') ||
@@ -331,6 +336,7 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
           low.includes('cobrafácil') ||
           low.includes('cobrafacil') ||
           low.includes('parceiroagência') ||
+          low.includes('trickspace') ||
           low.includes('quero testar') ||
           low.includes('sistema ia') ||
           low.includes('teste hoje');
@@ -339,13 +345,37 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
         if (!commercialContacts.has(remoteJid) && !commercialContacts.has(senderDigits) && !mentionsProduct) {
           continue;
         }
+        commercialContacts.add(remoteJid);
+        commercialContacts.add(senderDigits);
+
+        if (!text && audioMsg && typeof downloadMediaMessage === 'function') {
+          try {
+            const buf = await downloadMediaMessage(
+              msg,
+              'buffer',
+              {},
+              { logger: pino({ level: 'silent' }), reuploadRequest: activeSock.updateMediaMessage }
+            );
+            if (buf && buf.length > 0 && buf.length <= 4 * 1024 * 1024) {
+              audioBase64 = Buffer.from(buf).toString('base64');
+              audioMime = String(audioMsg.mimetype || 'audio/ogg').split(';')[0].trim();
+            }
+          } catch (e) {
+            console.error('[WA-BRIDGE] Audio download error:', e?.message);
+          }
+          if (!audioBase64) {
+            text = '[Áudio recebido — pedir resumo rápido em texto ou oferecer demonstração]';
+          }
+        }
 
         const pushName = msg.pushName || `Cliente ${senderDigits}`;
         const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
           remote_jid: remoteJid,
           phone: senderDigits,
           contact_name: pushName,
-          message: text,
+          message: text || '[ÁUDIO_WHATSAPP]',
+          audio_base64: audioBase64,
+          audio_mime: audioMime,
         });
 
         if (replyData && replyData.auto_reply && sock && connectionStatus === 'CONNECTED') {
@@ -381,6 +411,14 @@ if (hasRegisteredCreds()) {
         res.on('end', () => {
           try {
             const parsed = JSON.parse(chunks || '{}');
+            if (Array.isArray(parsed?.known_contacts)) {
+              for (const ph of parsed.known_contacts) {
+                if (ph) {
+                  commercialContacts.add(String(ph));
+                  commercialContacts.add(`${ph}@s.whatsapp.net`);
+                }
+              }
+            }
             if (parsed && parsed.ok && parsed.files && parsed.files['creds.json']) {
               fs.mkdirSync(AUTH_DIR, { recursive: true });
               for (const [fn, content] of Object.entries(parsed.files)) {

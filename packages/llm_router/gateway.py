@@ -204,3 +204,59 @@ class MultiModelLLMGateway:
             latency_ms=latency_ms,
             used_fallback=True,
         )
+
+    @classmethod
+    async def transcribe_whatsapp_audio(
+        cls,
+        db: AsyncSession,
+        audio_base64: str,
+        mime_type: str = "audio/ogg",
+    ) -> str:
+        """
+        Decodifica e transcreve áudios de voz (.ogg / opus) enviados por donos de empresa
+        no WhatsApp usando Gemini Multimodal gratuito.
+        """
+        if not audio_base64:
+            return ""
+        gemini_key = await ConfigVault.get_secret(db, "GEMINI_API_KEY")
+        if not gemini_key:
+            return "[Cliente enviou áudio de voz no WhatsApp]"
+
+        clean_mime = (mime_type or "audio/ogg").split(";")[0].strip() or "audio/ogg"
+        for model in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-3-flash-preview"):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+            body = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "text": (
+                                    "Transcreve fielmente o que o cliente falou neste áudio de WhatsApp em português do Brasil. "
+                                    "Retorna APENAS a transcrição direta sem comentários extras."
+                                )
+                            },
+                            {
+                                "inlineData": {
+                                    "mimeType": clean_mime,
+                                    "data": audio_base64,
+                                }
+                            },
+                        ],
+                    }
+                ],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 450},
+            }
+            try:
+                async with httpx.AsyncClient(timeout=22.0) as client:
+                    resp = await client.post(url, json=body)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                        txt = " ".join(p.get("text", "") for p in parts).strip()
+                        if txt:
+                            return txt
+            except Exception:
+                continue
+        return "[Cliente enviou áudio no WhatsApp pedindo informações sobre o sistema]"
+

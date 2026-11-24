@@ -1141,6 +1141,16 @@ export default function App() {
             </a>
 
             <a
+              href="/trickspace"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-fuchsia-500/15 border border-fuchsia-500/40 text-fuchsia-300 hover:bg-fuchsia-500/25 text-xs font-bold transition"
+              title="Abrir Loja Automática TrickSpace ZeroLag R$ 19,90 no Pix"
+            >
+              🎮 Loja TrickSpace
+            </a>
+
+            <a
               href="/api/system/export-monorepo.zip"
               download
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-500/15 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/25 text-xs font-bold transition"
