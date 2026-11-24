@@ -178,6 +178,7 @@ async def seed_initial_empire_state() -> None:
                 tagline=v_tagline,
                 monthly_price_usd=v_price,
                 initial_customers=0,
+                fast_seed=True,
             )
 
         await MetaCreatorAgent.propose_specialized_agent(

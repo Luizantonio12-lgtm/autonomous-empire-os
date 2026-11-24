@@ -62,14 +62,22 @@ from packages.security import SovereignSecurityGuard  # noqa: E402
 from packages.ventures import AutonomousVentureBuilder  # noqa: E402
 
 
+async def _boot_seed_and_daemons():
+    try:
+        await run_seed()
+    except Exception as exc:
+        print(f"[EMPIRE BOOT] Seed warning: {exc}")
+    AutonomousSchedulerDaemon.start_background_worker()
+    AutonomousOutreachEngine.start_autopilot_daemon()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_database()
     await event_bus.connect_redis_if_available()
-    await run_seed()
-    AutonomousSchedulerDaemon.start_background_worker()
-    AutonomousOutreachEngine.start_autopilot_daemon()
+    boot_task = asyncio.create_task(_boot_seed_and_daemons())
     yield
+    boot_task.cancel()
     await AutonomousOutreachEngine.stop_autopilot_daemon()
     await AutonomousSchedulerDaemon.stop_background_worker()
 

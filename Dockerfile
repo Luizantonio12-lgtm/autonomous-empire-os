@@ -23,6 +23,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+COPY Dockerfile render.yaml /app/
 COPY packages /app/packages
 COPY apps/api-gateway /app/apps/api-gateway
 COPY --from=frontend-builder /ui/dist /app/apps/command-center/dist
