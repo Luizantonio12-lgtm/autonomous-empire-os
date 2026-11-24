@@ -248,6 +248,21 @@ export default function App() {
     }
   };
 
+  const testVipAlert = async () => {
+    setBusy(true);
+    try {
+      const res = await fetch('/api/whatsapp/test-vip-alert', { method: 'POST' });
+      const json = await res.json();
+      if (json.ok) {
+        setAutoOutreachMsg('🔔 Alerta VIP enviado! Abra seu WhatsApp na conversa "Você mesmo" para conferir.');
+      } else {
+        setAutoOutreachMsg('⚠️ Conecte seu WhatsApp primeiro para receber o Alerta VIP.');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleOutreachAutopilot = async () => {
     const nextEnabled = !(data?.outreach_autopilot?.autopilot_enabled ?? true);
     setBusy(true);
@@ -1514,8 +1529,15 @@ export default function App() {
                         ? 'Iniciando...'
                         : `Disparar Agora Manualmente: ${huntNiche} em ${huntCity} (Opcional)`}
                     </button>
+                    <button
+                      onClick={testVipAlert}
+                      disabled={busy}
+                      className="px-4 py-2 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 text-cyan-300 font-bold text-xs cursor-pointer transition"
+                    >
+                      🔔 Testar Alerta VIP (&quot;Você Mesmo&quot;)
+                    </button>
                     <span className="text-xs text-slate-400">
-                      Os agentes já giram sozinhos por +20 cidades, respondem dúvidas e oferecem Pix (ou promo R$ 49,90)!
+                      Alertas VIP no seu próprio WhatsApp ativados (Pedido de Pix + Pix Pago Asaas)!
                     </span>
                   </div>
                 </div>

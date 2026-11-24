@@ -26,6 +26,7 @@ let starting = false;
 let lastBridgeEvent = 'boot';
 let lastBridgeError = '';
 let reconnectTimer = null;
+let ownerWelcomed = false;
 
 // Guarda APENAS os números/JIDs comerciais abordados pelos Agentes (protege conversas pessoais do dono!)
 const commercialContacts = new Set();
@@ -228,6 +229,26 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
         connectedPhone = meId.split(':')[0].split('@')[0] || connectedPhone;
         lastBridgeEvent = `connected:${connectedPhone}`;
         console.log('[WA-BRIDGE] WhatsApp REAL conectado:', connectedPhone);
+
+        if (!ownerWelcomed && connectedPhone) {
+          ownerWelcomed = true;
+          setTimeout(async () => {
+            try {
+              if (sock && connectionStatus === 'CONNECTED') {
+                const selfJid = `${connectedPhone}@s.whatsapp.net`;
+                await sock.sendMessage(selfJid, {
+                  text:
+                    '✅ *[Empire OS • Alerta VIP CEO Ativado]*\n\n' +
+                    'Seu sistema autônomo 24/7 já está conectado!\n' +
+                    '• 🟡 Quando um cliente pedir Pix, você será avisado aqui.\n' +
+                    '• 🟢 Quando um Pix cair no Asaas, a confirmação chega aqui na hora!',
+                });
+              }
+            } catch (e) {
+              console.error('[WA-BRIDGE] Self welcome error:', e?.message);
+            }
+          }, 3500);
+        }
       }
 
       if (connection === 'close') {
@@ -485,12 +506,35 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'POST' && req.url === '/notify-owner') {
+    if (!sock || connectionStatus !== 'CONNECTED') {
+      res.statusCode = 409;
+      return res.end(JSON.stringify({ ok: false, error: 'WHATSAPP_NOT_CONNECTED' }));
+    }
+    const body = await readJson(req);
+    const message = String(body.message || '').trim();
+    const ownerDigits = cleanDigits(body.owner_phone || connectedPhone || '5516993862008');
+    if (!message || !ownerDigits) {
+      res.statusCode = 400;
+      return res.end(JSON.stringify({ ok: false, error: 'Dados incompletos' }));
+    }
+    try {
+      const selfJid = `${ownerDigits}@s.whatsapp.net`;
+      await sock.sendMessage(selfJid, { text: message });
+      return res.end(JSON.stringify({ ok: true, jid: selfJid }));
+    } catch (err) {
+      res.statusCode = 500;
+      return res.end(JSON.stringify({ ok: false, error: err?.message || 'NOTIFY_OWNER_FAILED' }));
+    }
+  }
+
   if (req.method === 'POST' && req.url === '/disconnect') {
     try {
       if (sock) await sock.logout();
     } catch (_) {}
     clearAuthDir();
     sock = null;
+    ownerWelcomed = false;
     connectionStatus = 'DISCONNECTED';
     connectedPhone = '';
     currentQrSvg = '';

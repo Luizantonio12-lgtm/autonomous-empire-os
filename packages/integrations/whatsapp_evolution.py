@@ -104,6 +104,18 @@ class EvolutionWhatsAppManager:
             return r.json()
 
     @classmethod
+    async def notify_owner_vip(cls, message: str) -> dict:
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                r = await client.post(
+                    f"{WA_BRIDGE_URL}/notify-owner",
+                    json={"message": message},
+                )
+                return r.json()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @classmethod
     async def disconnect_instance(cls) -> dict:
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:

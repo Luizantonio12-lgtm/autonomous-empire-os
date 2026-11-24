@@ -508,4 +508,16 @@ class AutonomousOutreachEngine:
                 + ("Pix Asaas enviado automaticamente no WhatsApp!" if pix_block else "Dúvida respondida sozinha no WhatsApp!")
             ),
         )
+
+        if pix_block:
+            brl_sent = "49,90 (Promo 15 dias)" if has_price_objection else f"{price_brl}/mês"
+            await EvolutionWhatsAppManager.notify_owner_vip(
+                f"🔔 *[ALERTA VIP • CLIENTE PEDIU PIX!]*\n\n"
+                f"🏪 *Cliente:* {contact_name} (+{phone})\n"
+                f"📦 *Sistema:* {ven_name}\n"
+                f"💳 *Cobrança enviada:* R$ {brl_sent}\n"
+                f"💬 *Mensagem dele:* \"{message[:120]}\"\n\n"
+                f"🤖 Seu Agente Closer já enviou o Pix Copia e Cola na conversa!"
+            )
+
         return final_reply

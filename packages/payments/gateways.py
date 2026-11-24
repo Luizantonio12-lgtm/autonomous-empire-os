@@ -260,6 +260,21 @@ class PaymentGatewayManager:
             message=f"WEBHOOK {inv.provider} CONFIRMADO! +${inv.amount_usd:,.2f} USD liquidados por {inv.client_name}.",
             payload={"invoice_id": inv.id, "amount_usd": inv.amount_usd},
         )
+
+        try:
+            from packages.integrations.whatsapp_evolution import EvolutionWhatsAppManager
+
+            brl_paid = f"{round(inv.amount_usd * 5.65, 2):.2f}".replace(".", ",")
+            await EvolutionWhatsAppManager.notify_owner_vip(
+                f"💰🚀 *[VENDA CONFIRMADA NO PIX!]*\n\n"
+                f"💵 *Valor Recebido:* R$ {brl_paid}\n"
+                f"🏪 *Cliente:* {inv.client_name}\n"
+                f"📦 *Descrição:* {inv.description}\n\n"
+                f"✅ Pagamento conciliado no Asaas e somado ao Caixa Real do seu Empire OS!"
+            )
+        except Exception:
+            pass
+
         return inv
 
     @classmethod
@@ -312,6 +327,18 @@ class PaymentGatewayManager:
                 message=f"PIX REAL RECEBIDO NO ASAAS! R$ {brl_val:,.2f} (+${usd_equiv:,.2f} USD) creditados no Caixa.",
                 payload={"value_brl": brl_val, "amount_usd": usd_equiv},
             )
+            try:
+                from packages.integrations.whatsapp_evolution import EvolutionWhatsAppManager
+
+                brl_fmt = f"{brl_val:.2f}".replace(".", ",")
+                await EvolutionWhatsAppManager.notify_owner_vip(
+                    f"💰🚀 *[PIX REAL RECEBIDO NO ASAAS!]*\n\n"
+                    f"💵 *Valor Creditado:* R$ {brl_fmt}\n"
+                    f"🔖 *Referência:* {pay_id}\n\n"
+                    f"✅ O saldo do seu Empire OS já foi atualizado automaticamente!"
+                )
+            except Exception:
+                pass
             return {"settled": True, "direct_pix": True, "value_brl": brl_val}
 
         return {"ignored": True}

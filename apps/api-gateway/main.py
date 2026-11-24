@@ -811,6 +811,17 @@ async def whatsapp_disconnect():
     return {"ok": True, "whatsapp_instance": state}
 
 
+@app.post("/api/whatsapp/test-vip-alert")
+async def whatsapp_test_vip_alert():
+    out = await EvolutionWhatsAppManager.notify_owner_vip(
+        "🔔 *[Empire OS • Teste de Alerta VIP CEO]*\n\n"
+        "Tudo funcionando 100%! Você receberá avisos automáticos nesta conversa sempre que:\n"
+        "1️⃣ Um cliente pedir o Pix na conversa;\n"
+        "2️⃣ Um pagamento Pix for confirmado na sua conta Asaas!"
+    )
+    return out
+
+
 @app.post("/api/webhooks/evolution")
 async def evolution_whatsapp_webhook(
     payload: EvolutionWebhookPayload,
