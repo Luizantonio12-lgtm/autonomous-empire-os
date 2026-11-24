@@ -1,4 +1,6 @@
 import asyncio
+import time
+from collections import deque
 import json
 import os
 import sys
@@ -13,7 +15,7 @@ import httpx
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, desc, select
@@ -56,9 +58,11 @@ from packages.llm_router import ConfigVault  # noqa: E402
 from packages.memory import EmpireSemanticMemory  # noqa: E402
 from packages.orchestrator import execute_empire_directive  # noqa: E402
 from packages.payments import PaymentGatewayManager  # noqa: E402
+from packages.payments.gateways import PaymentGatewayUnavailable  # noqa: E402
 from packages.sandbox_runner import DEPLOYMENTS_ROOT  # noqa: E402
 from packages.scheduler import AutonomousSchedulerDaemon  # noqa: E402
 from packages.security import SovereignSecurityGuard  # noqa: E402
+from packages.security.session_controls import COOKIE_NAME, same_origin, secure_credentials_configured, valid_internal_secret, valid_session  # noqa: E402
 from packages.ventures import AutonomousVentureBuilder  # noqa: E402
 
 
@@ -86,7 +90,37 @@ app = FastAPI(
     title="Autonomous Business Empire v3.0 — API Gateway",
     version="3.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
+
+@app.middleware("http")
+async def restrict_sensitive_api(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    if path in ("/api/health", "/api/security/login", "/api/webhooks/asaas"):
+        if path == "/api/security/login" and request.method != "GET":
+            if not same_origin(request.headers.get("origin"), request.headers.get("host")):
+                return JSONResponse(status_code=403, content={"detail": "Origem não autorizada."})
+        return await call_next(request)
+    if path in ("/api/internal/wa-auth-backup", "/api/internal/wa-auth-restore", "/api/internal/wa-delivery-status", "/api/webhooks/wa-bridge-inbound"):
+        if not valid_internal_secret(request.headers.get("x-wa-internal-secret")):
+            return JSONResponse(status_code=403, content={"detail": "Acesso interno negado."})
+        return await call_next(request)
+    if not valid_session(request.cookies.get(COOKIE_NAME)):
+        return JSONResponse(status_code=401, content={"detail": "Autenticação necessária."})
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if not same_origin(request.headers.get("origin"), request.headers.get("host")):
+            return JSONResponse(status_code=403, content={"detail": "Origem não autorizada."})
+    return await call_next(request)
+
+
+@app.exception_handler(PaymentGatewayUnavailable)
+async def payment_unavailable_handler(request: Request, exc: PaymentGatewayUnavailable):
+    return JSONResponse(status_code=503, content={"ok": False, "detail": "Pagamento indisponível. Tente novamente mais tarde."})
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -733,13 +767,27 @@ async def launch_growth_campaign_endpoint(
 # ============================================================================
 # SEGURANÇA SOBERANA CEO (JWT HS256 + TOTP 2FA RFC 6238 + GLOBAL KILL-SWITCH)
 # ============================================================================
+# Limite global por processo: mitigação complementar, não substitui WAF ou
+# rate limiting distribuído em ambientes com várias instâncias.
+_LOGIN_ATTEMPTS: deque[float] = deque()
+
+
 @app.post("/api/security/login")
 async def ceo_sovereign_login(
     payload: SecurityLoginRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    ip_hint = request.client.host if request.client else "127.0.0.1"
+    if not secure_credentials_configured():
+        raise HTTPException(status_code=503, detail="Credenciais seguras ainda não configuradas.")
+    now = time.monotonic()
+    while _LOGIN_ATTEMPTS and _LOGIN_ATTEMPTS[0] <= now - 60:
+        _LOGIN_ATTEMPTS.popleft()
+    if len(_LOGIN_ATTEMPTS) >= 10:
+        raise HTTPException(status_code=429, detail="Muitas tentativas. Aguarde um minuto.")
+    _LOGIN_ATTEMPTS.append(now)
+    ip_hint = request.client.host if request.client else "unknown"
     try:
         auth = await SovereignSecurityGuard.authenticate_ceo(
             db=db,
@@ -747,9 +795,16 @@ async def ceo_sovereign_login(
             totp_code=payload.totp_code,
             ip_hint=ip_hint,
         )
-        return {"ok": True, **auth}
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
+        response.set_cookie(COOKIE_NAME, auth["token"], httponly=True, secure=True, samesite="strict", max_age=14400, path="/")
+        return {"ok": True, "role": auth["role"]}
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
+
+
+@app.post("/api/security/logout")
+async def ceo_logout(response: Response):
+    response.delete_cookie(COOKIE_NAME, path="/", secure=True, httponly=True, samesite="strict")
+    return {"ok": True}
 
 
 @app.post("/api/security/kill-switch")
@@ -869,11 +924,9 @@ async def settle_payment_webhook(
     invoice_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        inv = await PaymentGatewayManager.reconcile_paid_webhook(db, invoice_id)
-        return {"ok": True, "invoice_id": inv.id, "status": inv.status}
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    # Uma solicitação com ID de fatura não é prova de pagamento.
+    # Desabilitado até existir conciliação autenticada com o provedor.
+    raise HTTPException(status_code=403, detail="Liquidação manual desabilitada.")
 
 
 @app.post("/api/webhooks/asaas")
@@ -881,12 +934,75 @@ async def asaas_production_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    from packages.payments.asaas_sandbox_inbox import record_event, sandbox_enabled
+    from packages.payments.asaas_validation import valid_webhook_token
+
+    if not sandbox_enabled():
+        raise HTTPException(status_code=503, detail="Conciliação Asaas indisponível fora do sandbox de testes.")
+    token = os.getenv("ASAAS_WEBHOOK_TOKEN", "")
+    if not (32 <= len(token) <= 255) or any(c.isspace() for c in token):
+        raise HTTPException(status_code=503, detail="Token sandbox não configurado.")
+    if not valid_webhook_token(token, request.headers.get("asaas-access-token", "")):
+        raise HTTPException(status_code=401, detail="Token inválido.")
+    api_key = await ConfigVault.get_secret(db, "ASAAS_API_KEY")
+    if token == api_key:
+        raise HTTPException(status_code=503, detail="Token do webhook deve ser diferente da chave de API.")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > 65536:
+            raise HTTPException(status_code=413, detail="Evento muito grande.")
+        chunks.append(chunk)
     try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    result = await PaymentGatewayManager.handle_asaas_webhook(db, body)
-    return {"ok": True, **result}
+        body = json.loads(b"".join(chunks))
+        created = await record_event(db, body)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Evento inválido ou conflito de identificação.")
+    # Durável, mas NÃO liquidado: ainda exige verificação e revisão manual.
+    return {"ok": True, "recorded": created, "settled": False}
+
+
+@app.get("/api/payments/asaas-inbox")
+async def list_asaas_sandbox_events(
+    offset: int = Query(default=0, ge=0, le=100000),
+    limit: int = Query(default=25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    from packages.database.models import AsaasWebhookInbox
+    from packages.payments.asaas_sandbox_inbox import sandbox_enabled
+    if not sandbox_enabled():
+        raise HTTPException(status_code=503, detail="Caixa do Sandbox Asaas não está habilitada.")
+    rows = (await db.execute(select(AsaasWebhookInbox)
+        .order_by(desc(AsaasWebhookInbox.created_at), desc(AsaasWebhookInbox.event_id))
+        .offset(offset).limit(limit + 1))).scalars().all()
+    return {
+        'ok': True,
+        'sandbox_only': True,
+        'items': [{
+            'event_id': row.event_id,
+            'event_type': row.event_type,
+            'payment_id': row.payment_id,
+            'status': row.status,
+            'reason': row.verification_reason,
+            'invoice_id': row.invoice_id,
+            'created_at': row.created_at.isoformat() if row.created_at else '',
+            'verified_at': row.verified_at.isoformat() if row.verified_at else None,
+        } for row in rows[:limit]],
+        'next_offset': offset + limit if len(rows) > limit else None,
+    }
+
+
+@app.post("/api/payments/asaas-inbox/{event_id}/verify")
+async def verify_asaas_sandbox_event(event_id: str, db: AsyncSession = Depends(get_db)):
+    from packages.payments.asaas_sandbox_inbox import verify_received_event
+    try:
+        return {"ok": True, **await verify_received_event(db, event_id)}
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Evento não encontrado.")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Evento inválido.")
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Verificação sandbox indisponível.")
 
 
 @app.post("/api/whatsapp/qr/refresh")
@@ -1073,13 +1189,23 @@ class SingleAutoSendRequest(BaseModel):
 
 class WaBridgeInboundRequest(BaseModel):
     remote_jid: str = ""
+    phone_jid: str = ""
+    message_id: str = ""
     phone: str
     contact_name: str = "Cliente WhatsApp"
     message: str
+    has_audio: bool = False
+    has_image: bool = False
     audio_base64: str = ""
     audio_mime: str = "audio/ogg"
     image_base64: str = ""
     image_mime: str = "image/jpeg"
+
+
+class WaDeliveryStatusRequest(BaseModel):
+    phone_jid: str = Field(..., max_length=128)
+    message_id: str = Field(..., max_length=128)
+    result: str = Field(..., pattern=r'^(SUBMITTED|UNCERTAIN)$')
 
 
 class VipSetupCheckoutRequest(BaseModel):
@@ -1180,17 +1306,79 @@ async def handle_wa_bridge_inbound(
     payload: WaBridgeInboundRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    reply = await AutonomousOutreachEngine.handle_real_whatsapp_reply(
+    from packages.leads.conversation_policy import handle_inbound
+
+    result = await handle_inbound(
         db=db,
-        phone=payload.phone,
-        contact_name=payload.contact_name,
+        message_id=payload.message_id,
+        phone_jid=payload.phone_jid or payload.remote_jid,
+        name=payload.contact_name,
         message=payload.message,
-        audio_base64=payload.audio_base64,
-        audio_mime=payload.audio_mime,
-        image_base64=payload.image_base64,
-        image_mime=payload.image_mime,
+        audio=payload.has_audio or bool(payload.audio_base64) or payload.message.startswith('[ÁUDIO_WHATSAPP]') or payload.message.startswith('[Áudio recebido'),
+        image=payload.has_image or bool(payload.image_base64) or payload.message == '[FOTO_WHATSAPP]',
+        handoff=payload.message.startswith('[CEO_HANDOFF_TRIGGER]'),
     )
-    return {"ok": True, "auto_reply": reply}
+    return {"ok": True, "auto_reply": result['reply'], "reason": result['reason']}
+
+
+@app.post("/api/internal/wa-delivery-status")
+async def wa_delivery_status(payload: WaDeliveryStatusRequest, db: AsyncSession = Depends(get_db)):
+    from datetime import datetime, timezone
+    from sqlalchemy import update
+    from packages.database.models import WhatsAppReplyDelivery
+    from packages.leads.conversation_policy import message_hash_for
+
+    key = message_hash_for(payload.phone_jid, payload.message_id)
+    if not key:
+        raise HTTPException(status_code=400, detail="Identificador inválido.")
+    result = await db.execute(update(WhatsAppReplyDelivery).where(
+        WhatsAppReplyDelivery.message_hash == key,
+        WhatsAppReplyDelivery.status == 'PREPARED',
+    ).values(status=payload.result, updated_at=datetime.now(timezone.utc)))
+    await db.commit()
+    return {"ok": True, "updated": result.rowcount == 1}
+
+
+@app.get("/api/conversations")
+async def list_conversations(
+    pending_only: bool = False,
+    offset: int = Query(default=0, ge=0, le=100000),
+    limit: int = Query(default=30, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    from packages.database.models import WhatsAppReplyDelivery
+    query = (select(OmnichannelInteraction, WhatsAppReplyDelivery.status)
+        .outerjoin(WhatsAppReplyDelivery, WhatsAppReplyDelivery.interaction_id == OmnichannelInteraction.id)
+        .where(OmnichannelInteraction.channel == 'WHATSAPP_REAL_AUTO'))
+    if pending_only:
+        query = query.where(OmnichannelInteraction.deal_stage == 'WAIT_HUMAN_REVIEW')
+    rows = (await db.execute(query.order_by(desc(OmnichannelInteraction.created_at), desc(OmnichannelInteraction.id))
+                             .offset(offset).limit(limit + 1))).all()
+    items = [{
+        'id': interaction.id,
+        'contact_name': interaction.contact_name,
+        'contact_handle': interaction.contact_handle,
+        'inbound_message': interaction.inbound_message,
+        'agent_response': interaction.agent_response,
+        'deal_stage': interaction.deal_stage,
+        'delivery_status': status or ('NO_AUTO_REPLY' if interaction.deal_stage in ('WAIT_HUMAN_REVIEW', 'REVIEWED_HUMAN') else 'LEGACY_UNKNOWN'),
+        'created_at': interaction.created_at.isoformat() if interaction.created_at else '',
+    } for interaction, status in rows[:limit]]
+    return {'ok': True, 'items': items, 'next_offset': offset + limit if len(rows) > limit else None}
+
+
+@app.post("/api/conversations/{interaction_id}/reviewed")
+async def mark_conversation_reviewed(interaction_id: str, db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import update
+    result = await db.execute(update(OmnichannelInteraction).where(
+        OmnichannelInteraction.id == interaction_id,
+        OmnichannelInteraction.channel == 'WHATSAPP_REAL_AUTO',
+        OmnichannelInteraction.deal_stage == 'WAIT_HUMAN_REVIEW',
+    ).values(deal_stage='REVIEWED_HUMAN'))
+    await db.commit()
+    if result.rowcount != 1:
+        raise HTTPException(status_code=404, detail='Mensagem pendente não encontrada.')
+    return {'ok': True, 'sent': False}
 
 
 @app.post("/api/vip-setup/checkout-pix")
@@ -1423,6 +1611,9 @@ async def reset_to_strict_real_treasury_mode(db: AsyncSession = Depends(get_db))
 
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(ws: WebSocket):
+    if not same_origin(ws.headers.get("origin"), ws.headers.get("host")) or not valid_session(ws.cookies.get(COOKIE_NAME)):
+        await ws.close(code=1008)
+        return
     await ws.accept()
     queue = event_bus.subscribe()
     try:

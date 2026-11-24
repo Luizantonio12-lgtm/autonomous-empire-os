@@ -1,14 +1,17 @@
+import base64
+import binascii
 import hashlib
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 import httpx
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.agents.llm_interceptor import FinancialLedgerInterceptor
 from packages.database.event_bus import event_bus
-from packages.database.models import PaymentInvoice
+from packages.database.models import PaymentInvoice, PixInvoiceExpectation
 from packages.llm_router.vault import ConfigVault
 
 
@@ -60,6 +63,10 @@ def generate_matrix_qr_svg(payload_text: str, accent_color: str = "#10b981") -> 
     )
 
 
+class PaymentGatewayUnavailable(Exception):
+    """Não foi possível criar uma cobrança real no provedor."""
+
+
 class PaymentGatewayManager:
     """
     Conector Financeiro de Produção:
@@ -80,10 +87,16 @@ class PaymentGatewayManager:
     ) -> PaymentInvoice:
         inv_id = f"inv-{uuid.uuid4().hex[:8]}"
         provider_clean = provider.upper()
+        # Enquanto a reconciliação segura está em homologação, esta branch
+        # não cria cobranças reais, inclusive pelo painel administrativo.
+        from packages.payments.asaas_sandbox_inbox import sandbox_enabled
+        if provider_clean != 'ASAAS_PIX' or not sandbox_enabled():
+            raise PaymentGatewayUnavailable('Cobranças disponíveis apenas no Sandbox Asaas de teste.')
         checkout_url: str | None = None
         pix_copy_paste: str | None = None
         pix_qr_svg: str | None = None
         external_id = f"ext_{uuid.uuid4().hex[:12]}"
+        amount_brl_cents: int | None = None
 
         if provider_clean == "STRIPE":
             stripe_key = await ConfigVault.get_secret(db, "STRIPE_SECRET_KEY")
@@ -113,7 +126,7 @@ class PaymentGatewayManager:
                     pass
 
             if not checkout_url:
-                checkout_url = f"https://checkout.stripe.com/c/pay/cs_empire_{inv_id}"
+                raise PaymentGatewayUnavailable("Não foi possível criar checkout Stripe real.")
 
         else:  # ASAAS_PIX (Produção Real Banco Central)
             asaas_key = await ConfigVault.get_secret(db, "ASAAS_API_KEY")
@@ -149,7 +162,9 @@ class PaymentGatewayManager:
 
                         # 2. Gera QR Code Pix oficial escaneável em Reais (BRL)
                         if address_key:
-                            brl_value = max(round(amount_usd * 5.65, 2), 1.0)
+                            brl_amount = max((Decimal(str(amount_usd)) * Decimal('5.65')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), Decimal('1.00'))
+                            brl_value = float(brl_amount)
+                            amount_brl_cents = int(brl_amount * 100)
                             clean_desc = (description or "NexusFlow AI").strip()[:35]
                             qr_resp = await client.post(
                                 f"{asaas_base}/pix/qrCodes/static",
@@ -159,6 +174,7 @@ class PaymentGatewayManager:
                                     "description": clean_desc,
                                     "value": brl_value,
                                     "format": "ALL",
+                                    "allowsMultiplePayments": False,
                                     "externalReference": inv_id,
                                 },
                             )
@@ -167,23 +183,27 @@ class PaymentGatewayManager:
                                 external_id = qdata.get("id", external_id)
                                 pix_copy_paste = qdata.get("payload")
                                 encoded_img = qdata.get("encodedImage")
-                                if encoded_img:
-                                    pix_qr_svg = (
-                                        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">'
-                                        '<rect width="192" height="192" rx="12" fill="#ffffff"/>'
-                                        f'<image href="data:image/png;base64,{encoded_img}" x="8" y="8" width="176" height="176"/>'
-                                        "</svg>"
-                                    )
+                                if isinstance(encoded_img, str) and len(encoded_img) <= 1_000_000:
+                                    try:
+                                        raw = base64.b64decode(encoded_img, validate=True)
+                                    except (ValueError, binascii.Error):
+                                        raw = b''
+                                    if raw.startswith(b'\x89PNG\r\n\x1a\n'):
+                                        safe_image = base64.b64encode(raw).decode('ascii')
+                                        pix_qr_svg = (
+                                            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">'
+                                            '<rect width="192" height="192" rx="12" fill="#ffffff"/>'
+                                            f'<image href="data:image/png;base64,{safe_image}" x="8" y="8" width="176" height="176"/>'
+                                            "</svg>"
+                                        )
                 except Exception:
                     pass
 
-            if not pix_copy_paste:
-                pix_copy_paste = (
-                    f"00020126580014BR.GOV.BCB.PIX0136empire-treasury-{inv_id}"
-                    f"5204000053039865407{amount_usd:.2f}5802BR5917AUTONOMOUS EMPIRE6009SAO PAULO62070503***6304ABCD"
-                )
-            if not pix_qr_svg:
-                pix_qr_svg = generate_matrix_qr_svg(pix_copy_paste, accent_color="#10b981")
+            if not pix_copy_paste or not isinstance(external_id, str) or not external_id or external_id.startswith('ext_') or amount_brl_cents is None:
+                # Nunca apresentar um payload sintético ou QR sem ID conciliável.
+                raise PaymentGatewayUnavailable("Não foi possível criar Pix real no Asaas.")
+            # Sem imagem do provedor, ofereça apenas o código copia e cola.
+            # generate_matrix_qr_svg não é um codificador QR válido.
 
         invoice = PaymentInvoice(
             id=inv_id,
@@ -192,13 +212,17 @@ class PaymentGatewayManager:
             client_name=client_name,
             client_email=client_email,
             description=description,
-            amount_usd=round(amount_usd, 2),
+            # Preserve a precisão usada na conversão para BRL; registros antigos
+            # arredondados a dois decimais ainda exigem revisão individual.
+            amount_usd=round(amount_usd, 4),
             status="PENDING",
             checkout_url=checkout_url,
             pix_copy_paste=pix_copy_paste,
             pix_qr_svg=pix_qr_svg,
         )
         db.add(invoice)
+        if provider_clean == 'ASAAS_PIX' and amount_brl_cents is not None:
+            db.add(PixInvoiceExpectation(invoice_id=inv_id, amount_brl_cents=amount_brl_cents))
         await db.commit()
 
         await event_bus.publish(

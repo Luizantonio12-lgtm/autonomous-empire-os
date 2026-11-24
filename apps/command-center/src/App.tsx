@@ -83,7 +83,37 @@ interface RealLeadItem {
   whatsapp_url: string;
 }
 
+interface SandboxPaymentEvent {
+  event_id: string;
+  event_type: string;
+  payment_id: string | null;
+  status: string;
+  reason: string | null;
+  invoice_id: string | null;
+  created_at: string;
+}
+
+interface ConversationItem {
+  id: string;
+  contact_name: string;
+  contact_handle: string;
+  inbound_message: string;
+  agent_response: string;
+  deal_stage: string;
+  delivery_status: 'PREPARED' | 'SUBMITTED' | 'UNCERTAIN' | 'NO_AUTO_REPLY' | 'LEGACY_UNKNOWN';
+  created_at: string;
+}
+
 export default function App() {
+  const [conversationItems, setConversationItems] = useState<ConversationItem[]>([]);
+  const [conversationPending, setConversationPending] = useState(true);
+  const [conversationOffset, setConversationOffset] = useState<number | null>(null);
+  const [conversationError, setConversationError] = useState<string | null>(null);
+  const [conversationBusy, setConversationBusy] = useState(false);
+  const [sandboxEvents, setSandboxEvents] = useState<SandboxPaymentEvent[]>([]);
+  const [sandboxNextOffset, setSandboxNextOffset] = useState<number | null>(null);
+  const [sandboxError, setSandboxError] = useState<string | null>(null);
+  const [sandboxBusy, setSandboxBusy] = useState(false);
   const [data, setData] = useState<DashboardOverview | null>(null);
   const [events, setEvents] = useState<TelemetryEvent[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
@@ -100,9 +130,9 @@ export default function App() {
   const [activeVenture, setActiveVenture] = useState<BusinessVentureItem | null>(null);
 
   // Segurança Soberana (Lock Screen JWT + 2FA TOTP)
-  const [isLocked, setIsLocked] = useState(false);
+  const [isLocked, setIsLocked] = useState(true);
   const [jwtToken, setJwtToken] = useState<string | null>(null);
-  const [loginPassword, setLoginPassword] = useState('empire2026');
+  const [loginPassword, setLoginPassword] = useState('');
   const [loginTotp, setLoginTotp] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
 
@@ -428,6 +458,83 @@ export default function App() {
 
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
+  const loadConversations = useCallback(async (pending: boolean, offset: number, append: boolean, signal?: AbortSignal) => {
+    setConversationBusy(true);
+    setConversationError(null);
+    try {
+      const res = await fetch(`/api/conversations?pending_only=${pending}&offset=${offset}&limit=30`, { signal });
+      if (!res.ok) throw new Error('Não foi possível carregar as conversas.');
+      const json: { items: ConversationItem[]; next_offset: number | null } = await res.json();
+      if (signal?.aborted) return;
+      setConversationItems((prev) => append ? [...prev, ...json.items] : json.items);
+      setConversationOffset(json.next_offset);
+    } catch (err) {
+      if (!signal?.aborted) setConversationError('Não foi possível carregar as conversas. Verifique sua sessão.');
+    } finally {
+      if (!signal?.aborted) setConversationBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isLocked || activeTab !== 'OMNICHANNEL') return;
+    const controller = new AbortController();
+    setConversationItems([]);
+    setConversationOffset(null);
+    void loadConversations(conversationPending, 0, false, controller.signal);
+    return () => controller.abort();
+  }, [activeTab, isLocked, conversationPending, loadConversations]);
+
+  const markReviewed = async (id: string) => {
+    setConversationBusy(true);
+    try {
+      const res = await fetch(`/api/conversations/${encodeURIComponent(id)}/reviewed`, { method: 'POST' });
+      if (!res.ok) throw new Error('Falha ao atualizar.');
+      await loadConversations(conversationPending, 0, false);
+    } catch {
+      setConversationError('Não foi possível marcar como revisada.');
+      setConversationBusy(false);
+    }
+  };
+
+  const loadSandboxEvents = useCallback(async (offset = 0, append = false, signal?: AbortSignal) => {
+    setSandboxBusy(true);
+    setSandboxError(null);
+    try {
+      const res = await fetch(`/api/payments/asaas-inbox?offset=${offset}&limit=25`, { signal });
+      if (!res.ok) throw new Error('Sandbox indisponível');
+      const json: { items: SandboxPaymentEvent[]; next_offset: number | null } = await res.json();
+      if (signal?.aborted) return;
+      setSandboxEvents((prev) => append ? [...prev, ...json.items] : json.items);
+      setSandboxNextOffset(json.next_offset);
+    } catch {
+      if (!signal?.aborted) setSandboxError('Sandbox de pagamento não configurado ou indisponível. Nenhuma cobrança foi conciliada.');
+    } finally {
+      if (!signal?.aborted) setSandboxBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isLocked || activeTab !== 'LEDGER') return;
+    const controller = new AbortController();
+    setSandboxEvents([]);
+    setSandboxNextOffset(null);
+    void loadSandboxEvents(0, false, controller.signal);
+    return () => controller.abort();
+  }, [isLocked, activeTab, loadSandboxEvents]);
+
+  const verifySandboxEvent = async (eventId: string) => {
+    setSandboxBusy(true);
+    setSandboxError(null);
+    try {
+      const res = await fetch(`/api/payments/asaas-inbox/${encodeURIComponent(eventId)}/verify`, {method: 'POST'});
+      if (!res.ok) throw new Error('Verificação indisponível.');
+      await loadSandboxEvents();
+    } catch {
+      setSandboxError('Não foi possível consultar o Asaas Sandbox. Nenhum pagamento foi marcado como pago.');
+      setSandboxBusy(false);
+    }
+  };
+
   const fetchOverview = useCallback(async () => {
     try {
       const res = await fetch('/api/dashboard/overview');
@@ -449,10 +556,11 @@ export default function App() {
   }, [activePreviewProject]);
 
   useEffect(() => {
-    fetchOverview();
-  }, [fetchOverview]);
+    if (!isLocked) fetchOverview();
+  }, [fetchOverview, isLocked]);
 
   useEffect(() => {
+    if (isLocked) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/telemetry`;
     let ws: WebSocket | null = null;
@@ -485,7 +593,7 @@ export default function App() {
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, [fetchOverview]);
+  }, [fetchOverview, isLocked]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -518,7 +626,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           password: loginPassword,
-          totp_code: loginTotp || data?.security.current_totp_demo || '',
+          totp_code: loginTotp,
         }),
       });
       const json = await res.json();
@@ -526,12 +634,28 @@ export default function App() {
         setLoginError(json.detail || 'Falha na autenticação 2FA.');
         return;
       }
-      setJwtToken(json.token);
+      setJwtToken('authenticated');
       setIsLocked(false);
+      setLoginPassword('');
       setLoginTotp('');
       await fetchOverview();
     } finally {
       setBusy(false);
+    }
+  };
+
+  const lockSession = async () => {
+    try {
+      const res = await fetch('/api/security/logout', { method: 'POST' });
+      if (!res.ok) throw new Error('Não foi possível encerrar a sessão.');
+      setJwtToken(null);
+      setData(null);
+      setEvents([]);
+      setConversationItems([]);
+      setSandboxEvents([]);
+      setIsLocked(true);
+    } catch {
+      window.alert('Não foi possível encerrar a sessão. Tente novamente.');
     }
   };
 
@@ -849,17 +973,6 @@ export default function App() {
     }
   };
 
-  const settleInvoiceWebhook = async (invoiceId: string) => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await fetch(`/api/webhooks/payments/${invoiceId}/settle`, { method: 'POST' });
-      await fetchOverview();
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const copyText = (id: string, text: string) => {
     navigator.clipboard?.writeText(text);
     setCopiedId(id);
@@ -956,28 +1069,6 @@ export default function App() {
             </div>
           </div>
 
-          {data?.security.totp_qr_svg && (
-            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 flex items-center gap-4">
-              <div
-                className="shrink-0"
-                dangerouslySetInnerHTML={{
-                  __html: data.security.totp_qr_svg
-                    .replace('width="192"', 'width="96"')
-                    .replace('height="192"', 'height="96"'),
-                }}
-              />
-              <div className="text-xs space-y-1">
-                <div className="text-slate-400">Código 2FA TOTP Atual (Authenticator):</div>
-                <div className="text-xl font-mono font-bold tracking-widest text-emerald-400">
-                  {data.security.current_totp_demo}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  Senha padrão: <code>empire2026</code>
-                </div>
-              </div>
-            </div>
-          )}
-
           <div className="space-y-3">
             <div>
               <label className="block text-xs text-slate-400 mb-1">Senha Mestre do CEO</label>
@@ -991,14 +1082,16 @@ export default function App() {
             </div>
             <div>
               <label className="block text-xs text-slate-400 mb-1">
-                Código 2FA TOTP (6 dígitos — vazio usa código ativo acima)
+                Código 2FA do seu aplicativo autenticador
               </label>
               <input
                 type="text"
                 maxLength={6}
                 value={loginTotp}
                 onChange={(e) => setLoginTotp(e.target.value)}
-                placeholder={data?.security.current_totp_demo ?? '000000'}
+                placeholder="000000"
+                inputMode="numeric"
+                required
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono tracking-widest text-emerald-300"
               />
             </div>
@@ -1122,7 +1215,7 @@ export default function App() {
 
             {/* LOCK CEO 2FA */}
             <button
-              onClick={() => setIsLocked(true)}
+              onClick={() => void lockSession()}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-violet-300 hover:border-violet-500/50 text-xs font-semibold cursor-pointer"
               title="Bloquear Painel com Senha + 2FA TOTP"
             >
@@ -2657,88 +2750,29 @@ export default function App() {
         {activeTab === 'LEDGER' && (
           <div className="space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              <form
-                onSubmit={createInvoice}
-                className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 h-fit"
-              >
-                <div className="flex items-center gap-2">
-                  <CreditCard className="w-5 h-5 text-emerald-400" />
-                  <h2 className="text-sm font-bold uppercase tracking-wider text-white">
-                    Emitir Cobrança Real (Stripe / Asaas Pix)
-                  </h2>
+              <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 h-fit">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-sm font-bold text-white">Conferência Asaas Sandbox</h2>
+                  <button onClick={() => void loadSandboxEvents()} disabled={sandboxBusy} className="text-xs text-emerald-300 underline">Atualizar</button>
                 </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setInvProvider('ASAAS_PIX')}
-                    className={`py-2 rounded-xl text-xs font-bold border cursor-pointer ${
-                      invProvider === 'ASAAS_PIX'
-                        ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
-                        : 'bg-slate-950 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    Asaas Pix Instantâneo (QR)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setInvProvider('STRIPE')}
-                    className={`py-2 rounded-xl text-xs font-bold border cursor-pointer ${
-                      invProvider === 'STRIPE'
-                        ? 'bg-cyan-500/20 border-cyan-500 text-cyan-300'
-                        : 'bg-slate-950 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    Stripe Checkout Global
-                  </button>
+                <p className="text-xs text-amber-300">Ambiente de teste. Verificar não marca pagamento como pago, não movimenta dinheiro e não libera produtos.</p>
+                {sandboxError && <p role="alert" className="text-xs text-rose-300">{sandboxError}</p>}
+                {!sandboxBusy && !sandboxError && sandboxEvents.length === 0 && <p className="text-xs text-slate-400">Nenhum evento de teste registrado.</p>}
+                <div className="space-y-2 max-h-[450px] overflow-y-auto">
+                  {sandboxEvents.map((ev) => <div key={ev.event_id} className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1">
+                    <div className="text-xs font-semibold text-white break-all">{ev.event_type} · {ev.event_id}</div>
+                    <div className="text-[11px] text-slate-400 break-all">Pagamento: {ev.payment_id || '—'} · Fatura: {ev.invoice_id || '—'}</div>
+                    <div className="text-xs text-amber-300">{ev.status === 'VERIFIED_NOT_SETTLED' ? 'Verificado no Sandbox, não liquidado' : ev.status === 'NEEDS_REVIEW' ? 'Requer revisão' : 'Aguardando revisão'}</div>
+                    {ev.reason && <div className="text-[11px] text-slate-400 break-all">Resultado: {ev.reason}</div>}
+                    {ev.event_type === 'PAYMENT_RECEIVED' && <button disabled={sandboxBusy} onClick={() => void verifySandboxEvent(ev.event_id)} className="mt-1 rounded-lg bg-slate-700 px-3 py-1.5 text-xs text-white">Consultar no Sandbox</button>}
+                  </div>)}
                 </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <input
-                    value={invClient}
-                    onChange={(e) => setInvClient(e.target.value)}
-                    placeholder="Empresa / Cliente"
-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-white"
-                    required
-                  />
-                  <input
-                    value={invEmail}
-                    onChange={(e) => setInvEmail(e.target.value)}
-                    placeholder="financeiro@cliente.com"
-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-white"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <input
-                    value={invDesc}
-                    onChange={(e) => setInvDesc(e.target.value)}
-                    placeholder="Descrição do contrato"
-                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-white"
-                    required
-                  />
-                  <input
-                    type="number"
-                    value={invAmount}
-                    onChange={(e) => setInvAmount(e.target.value)}
-                    placeholder="Valor USD"
-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-emerald-400 font-bold"
-                    required
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm cursor-pointer"
-                >
-                  Gerar Link de Pagamento / Pix QR Code
-                </button>
-              </form>
+                {sandboxNextOffset !== null && <button disabled={sandboxBusy} onClick={() => void loadSandboxEvents(sandboxNextOffset, true)} className="text-xs text-emerald-300 underline">Carregar mais eventos</button>}
+              </div>
 
               <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                  Faturas Emitidas & Conciliação Automática via Webhook (
+                  Faturas históricas — confirme no Asaas (
                   {data?.invoices.length ?? 0})
                 </h3>
                 <div className="space-y-3 max-h-[340px] overflow-y-auto">
@@ -2748,16 +2782,6 @@ export default function App() {
                       className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center"
                     >
                       <div className="flex items-center gap-3.5">
-                        {inv.pix_qr_svg && (
-                          <div
-                            className="w-20 h-20 shrink-0 rounded-lg overflow-hidden bg-slate-950"
-                            dangerouslySetInnerHTML={{
-                              __html: inv.pix_qr_svg
-                                .replace('width="192"', 'width="80"')
-                                .replace('height="192"', 'height="80"'),
-                            }}
-                          />
-                        )}
                         <div>
                           <div className="flex items-center gap-2">
                             <span className="font-bold text-sm text-white">{inv.client_name}</span>
@@ -2782,39 +2806,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="flex flex-wrap gap-2 shrink-0">
-                        {inv.pix_copy_paste && (
-                          <>
-                            <button
-                              onClick={() => copyText(inv.id, inv.pix_copy_paste!)}
-                              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center gap-1 cursor-pointer"
-                            >
-                              <Copy className="w-3.5 h-3.5" />
-                              {copiedId === inv.id ? 'Pix Copiado!' : 'Pix Copia-e-Cola'}
-                            </button>
-                            <a
-                              href={`https://wa.me/?text=${encodeURIComponent(
-                                `Olá ${inv.client_name}! Segue o código Pix Copia e Cola referente a ${inv.description} (R$ ${(inv.amount_usd * 5.65).toFixed(2)}):\n\n${inv.pix_copy_paste}`
-                              )}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="px-2.5 py-1.5 rounded-lg bg-emerald-600/25 border border-emerald-500/40 hover:bg-emerald-600/40 text-xs text-emerald-300 font-semibold flex items-center gap-1"
-                            >
-                              <MessageSquare className="w-3.5 h-3.5" />
-                              Cobrar no WhatsApp
-                            </a>
-                          </>
-                        )}
-                        {inv.status === 'PENDING' && (
-                          <button
-                            onClick={() => settleInvoiceWebhook(inv.id)}
-                            disabled={busy}
-                            className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs cursor-pointer"
-                          >
-                            Confirmar Webhook Pago
-                          </button>
-                        )}
-                      </div>
+
                     </div>
                   ))}
                 </div>
@@ -3063,42 +3055,42 @@ export default function App() {
             </div>
 
             <div className="lg:col-span-7 space-y-3">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                Histórico Omnicanal — Suporte 24h & Funil de Vendas ({data?.interactions.length ?? 0}
-                )
-              </h3>
-              <div className="space-y-3 max-h-[600px] overflow-y-auto">
-                {data?.interactions.map((it) => (
-                  <div
-                    key={it.id}
-                    className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-2"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="font-bold text-sm text-white">{it.contact_name}</span>
-                        <span className="ml-2 text-xs text-slate-400">({it.contact_handle})</span>
-                      </div>
-                      <span
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                          it.deal_stage === 'CLOSED_WON'
-                            ? 'bg-emerald-500/20 text-emerald-400'
-                            : 'bg-sky-500/20 text-sky-300'
-                        }`}
-                      >
-                        {it.deal_stage}
-                        {it.deal_value_usd > 0 ? ` • +$${it.deal_value_usd.toLocaleString()}` : ''}
-                      </span>
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-white">Conversas do WhatsApp</h3>
+                  <button onClick={() => void loadConversations(conversationPending, 0, false)} disabled={conversationBusy} className="text-xs text-emerald-300 underline">Atualizar</button>
+                </div>
+                <p className="text-xs text-slate-400">Mensagens recebidas durante o intervalo de 60 segundos ficam aqui para revisão. Nenhum botão desta lista envia mensagem automaticamente.</p>
+                <div className="flex gap-2">
+                  <button onClick={() => setConversationPending(true)} className={`rounded-lg px-3 py-2 text-xs font-semibold ${conversationPending ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Precisam de revisão</button>
+                  <button onClick={() => setConversationPending(false)} className={`rounded-lg px-3 py-2 text-xs font-semibold ${!conversationPending ? 'bg-emerald-400 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>Histórico</button>
+                </div>
+              </div>
+              {conversationError && <p role="alert" className="text-xs text-rose-300">{conversationError}</p>}
+              {!conversationBusy && conversationItems.length === 0 && !conversationError && <p className="text-xs text-slate-400">Nenhuma conversa nesta lista.</p>}
+              <div className="space-y-3 max-h-[720px] overflow-y-auto">
+                {conversationItems.map((it) => (
+                  <div key={it.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-2">
+                    <div className="flex flex-wrap justify-between gap-2">
+                      <div><span className="font-bold text-sm text-white">{it.contact_name}</span><span className="ml-2 text-xs text-slate-400">({it.contact_handle})</span></div>
+                      <span className="text-[10px] text-slate-400">{it.created_at ? new Date(it.created_at).toLocaleString('pt-BR') : ''}</span>
                     </div>
-                    <div className="bg-slate-950/70 rounded-xl p-2.5 text-xs text-slate-300">
-                      <strong className="text-slate-400">Entrada:</strong> {it.inbound_message}
-                    </div>
-                    <div className="bg-emerald-950/20 border border-emerald-500/20 rounded-xl p-2.5 text-xs text-emerald-200">
-                      <strong className="text-emerald-400">Agente Autónomo:</strong>{' '}
-                      {it.agent_response}
-                    </div>
+                    <div className="bg-slate-950/70 rounded-xl p-2.5 text-xs text-slate-300"><strong className="text-slate-400">Cliente:</strong> {it.inbound_message}</div>
+                    {it.agent_response && <div className="bg-emerald-950/20 border border-emerald-500/20 rounded-xl p-2.5 text-xs text-emerald-200"><strong>Resposta preparada:</strong> {it.agent_response}</div>}
+                    <p className="text-[11px] text-slate-400">
+                      {it.delivery_status === 'SUBMITTED' ? 'Chamada de envio concluída; entrega e leitura não confirmadas.' :
+                       it.delivery_status === 'PREPARED' ? 'Resposta preparada; envio não confirmado.' :
+                       it.delivery_status === 'UNCERTAIN' ? 'Resultado do envio incerto. Confira a conversa antes de agir.' :
+                       it.delivery_status === 'NO_AUTO_REPLY' ? 'Sem resposta automática.' : 'Registro antigo; envio não verificado.'}
+                    </p>
+                    {it.deal_stage === 'WAIT_HUMAN_REVIEW' && <div className="flex flex-wrap items-center gap-3 pt-1">
+                      {/^[0-9]{12,15}$/.test(it.contact_handle) && <a href={`https://wa.me/${it.contact_handle}`} target="_blank" rel="noreferrer" className="text-xs font-semibold text-emerald-300 underline">Abrir conversa no WhatsApp</a>}
+                      <button disabled={conversationBusy} onClick={() => void markReviewed(it.id)} className="rounded-lg bg-slate-700 px-3 py-1.5 text-xs font-semibold text-white">Marcar revisada</button>
+                    </div>}
                   </div>
                 ))}
               </div>
+              {conversationOffset !== null && <button disabled={conversationBusy} onClick={() => void loadConversations(conversationPending, conversationOffset, true)} className="rounded-lg bg-slate-800 px-3 py-2 text-xs text-white">Carregar mais</button>}
             </div>
           </div>
         )}
@@ -3214,37 +3206,14 @@ export default function App() {
                     </h2>
                   </div>
                   <button
-                    onClick={() => setIsLocked(true)}
+                    onClick={() => void lockSession()}
                     className="px-3 py-1 rounded-lg bg-violet-500 hover:bg-violet-400 text-slate-950 font-bold text-xs cursor-pointer"
                   >
                     Testar Ecrã Lock 2FA
                   </button>
                 </div>
 
-                {data?.security && (
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 flex items-center gap-4">
-                    <div
-                      className="shrink-0"
-                      dangerouslySetInnerHTML={{
-                        __html: data.security.totp_qr_svg
-                          .replace('width="192"', 'width="96"')
-                          .replace('height="192"', 'height="96"'),
-                      }}
-                    />
-                    <div className="text-xs space-y-1">
-                      <div className="text-slate-400">Segredo Base32 (Google Authenticator):</div>
-                      <div className="font-mono text-violet-300 font-bold">
-                        {data.security.totp_secret_b32}
-                      </div>
-                      <div className="text-slate-400 pt-1">
-                        Código TOTP Ativo ({data.security.totp_seconds_remaining}s):{' '}
-                        <strong className="font-mono text-emerald-400 text-sm">
-                          {data.security.current_totp_demo}
-                        </strong>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                <p className="text-xs text-slate-400">O código 2FA deve ser consultado no seu aplicativo autenticador. Segredos não são exibidos no painel.</p>
 
                 <div className="space-y-1 max-h-28 overflow-y-auto pt-1">
                   {data?.security_logs.slice(0, 4).map((sl) => (

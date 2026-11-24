@@ -64,7 +64,7 @@ class SovereignSecurityGuard:
         return False
 
     @classmethod
-    def issue_jwt(cls, subject: str = "CEO_SOVEREIGN", ttl_seconds: int = 86400) -> str:
+    def issue_jwt(cls, subject: str = "CEO_SOVEREIGN", ttl_seconds: int = 14400) -> str:
         header = {"alg": "HS256", "typ": "JWT"}
         now = int(time.time())
         payload = {
@@ -101,19 +101,10 @@ class SovereignSecurityGuard:
 
     @classmethod
     def get_security_overview(cls) -> dict:
-        otpauth_uri = (
-            f"otpauth://totp/AutonomousEmpire:CEO?secret={cls._totp_secret_b32}&issuer=AutonomousEmpire"
-        )
-        rem_secs = 30 - (int(time.time()) % 30)
+        # Nunca divulgar segredo 2FA, URI de provisionamento, código atual ou senha.
         return {
             "kill_switch_active": cls._kill_switch_active,
             "require_2fa": cls._require_2fa,
-            "totp_secret_b32": cls._totp_secret_b32,
-            "otpauth_uri": otpauth_uri,
-            "totp_qr_svg": generate_matrix_qr_svg(otpauth_uri, accent_color="#8b5cf6"),
-            "current_totp_demo": cls.generate_totp(),
-            "totp_seconds_remaining": rem_secs,
-            "default_password_hint": "empire2026",
         }
 
     @classmethod

@@ -146,6 +146,7 @@ function postJsonLocal(urlPath, payload) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-WA-Internal-Secret': process.env.WA_INTERNAL_SECRET || '',
           'Content-Length': body.length,
         },
         timeout: 25000,
@@ -404,6 +405,8 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
 
       const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
         remote_jid: remoteJid,
+        phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid,
+        message_id: msgId,
         phone: realPhoneRaw,
         contact_name: (lastCust && lastCust.pushName) || `Empresa ${realPhoneRaw.slice(-4)}`,
         message: `[CEO_HANDOFF_TRIGGER] Dica:${hint || 'Geral'} | Cliente disse: ${lastCustText || 'Pediu informações'}`,
@@ -414,10 +417,12 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
           await sock.sendPresenceUpdate('composing', remoteJid);
           await new Promise((r) => setTimeout(r, 1500));
           await sock.sendMessage(remoteJid, { text: replyData.auto_reply });
+          await postJsonLocal('/api/internal/wa-delivery-status', { phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid, message_id: msgId, result: 'SUBMITTED' });
           await sock.sendPresenceUpdate('paused', remoteJid);
           sentCount += 1;
           return true;
         } catch (e) {
+          await postJsonLocal('/api/internal/wa-delivery-status', { phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid, message_id: msgId, result: 'UNCERTAIN' });
           console.error('[WA-BRIDGE] Magic command send error:', e?.message);
         }
       }
@@ -447,16 +452,13 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
         msg.message?.ephemeralMessage?.message?.imageMessage ||
         null;
       let text = extractMessageText(msg);
-      let audioBase64 = '';
-      let audioMime = 'audio/ogg';
-      let imageBase64 = '';
-      let imageMime = 'image/jpeg';
-
+      // Resposta conservadora: não baixa nem envia áudio ou imagem para IA.
       if (!text && !audioMsg && !imageMsg) return false;
 
       const low = (text || '').toLowerCase();
+      const optOut = /^(pare|parar|sair|cancelar|descadastrar|não quero|nao quero|não tenho interesse|nao tenho interesse)[\s.!]*$/i.test(low) || /\b(não|nao)\s+(me\s+)?(mande|envie|chame|contate|ligue)\b/i.test(low);
       const mentionsProductOrIntent =
-        BOT_SIGNATURE_WORDS.some((w) => low.includes(w)) ||
+        optOut || BOT_SIGNATURE_WORDS.some((w) => low.includes(w)) ||
         COMMERCIAL_REPLY_INTENTS.some((w) => low.includes(w));
 
       if (!forceCommercial && !isKnownCommercial(remoteJid, altJid) && !mentionsProductOrIntent) {
@@ -467,53 +469,16 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
       if (altJid) registerCommercial(altJid);
       if (msgId) answeredMsgIds.add(msgId);
 
-      if (!text && audioMsg && typeof downloadMediaMessage === 'function') {
-        try {
-          const buf = await downloadMediaMessage(
-            msg,
-            'buffer',
-            {},
-            { logger: pino({ level: 'silent' }), reuploadRequest: activeSock.updateMediaMessage }
-          );
-          if (buf && buf.length > 0 && buf.length <= 4 * 1024 * 1024) {
-            audioBase64 = Buffer.from(buf).toString('base64');
-            audioMime = String(audioMsg.mimetype || 'audio/ogg').split(';')[0].trim();
-          }
-        } catch (e) {
-          console.error('[WA-BRIDGE] Audio download error:', e?.message);
-        }
-        if (!audioBase64) {
-          text = '[Áudio recebido — pedir resumo rápido ou oferecer demonstração]';
-        }
-      }
-
-      if (imageMsg && typeof downloadMediaMessage === 'function') {
-        try {
-          const buf = await downloadMediaMessage(
-            msg,
-            'buffer',
-            {},
-            { logger: pino({ level: 'silent' }), reuploadRequest: activeSock.updateMediaMessage }
-          );
-          if (buf && buf.length > 0 && buf.length <= 4 * 1024 * 1024) {
-            imageBase64 = Buffer.from(buf).toString('base64');
-            imageMime = String(imageMsg.mimetype || 'image/jpeg').split(';')[0].trim();
-          }
-        } catch (e) {
-          console.error('[WA-BRIDGE] Image download error:', e?.message);
-        }
-      }
-
       const pushName = msg.pushName || `Cliente ${realPhoneRaw}`;
       const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
         remote_jid: remoteJid,
+        phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid,
+        message_id: msgId,
         phone: realPhoneRaw,
         contact_name: pushName,
-        message: text || (imageBase64 ? '[FOTO_WHATSAPP]' : '[ÁUDIO_WHATSAPP]'),
-        audio_base64: audioBase64,
-        audio_mime: audioMime,
-        image_base64: imageBase64,
-        image_mime: imageMime,
+        message: text || (imageMsg ? '[FOTO_WHATSAPP]' : '[ÁUDIO_WHATSAPP]'),
+        has_audio: !!audioMsg,
+        has_image: !!imageMsg,
       });
 
       if (replyData && replyData.auto_reply && sock && connectionStatus === 'CONNECTED') {
@@ -521,10 +486,12 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
           await sock.sendPresenceUpdate('composing', remoteJid);
           await new Promise((r) => setTimeout(r, 1800));
           await sock.sendMessage(remoteJid, { text: replyData.auto_reply });
+          await postJsonLocal('/api/internal/wa-delivery-status', { phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid, message_id: msgId, result: 'SUBMITTED' });
           await sock.sendPresenceUpdate('paused', remoteJid);
           sentCount += 1;
           return true;
         } catch (e) {
+          await postJsonLocal('/api/internal/wa-delivery-status', { phone_jid: !remoteJid.endsWith('@lid') ? remoteJid : altJid, message_id: msgId, result: 'UNCERTAIN' });
           console.error('[WA-BRIDGE] Auto-reply send error:', e?.message);
         }
       }
@@ -553,33 +520,9 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
     }
 
     async function sweepUnansweredCommercialChats() {
-      if (sweepingBacklog || !sock || connectionStatus !== 'CONNECTED') return 0;
-      sweepingBacklog = true;
-      let answeredNow = 0;
-      try {
-        const nowSec = Math.floor(Date.now() / 1000);
-        for (const [jid, msgs] of chatHistoryCache.entries()) {
-          if (!msgs.length || answeredNow >= 15) continue;
-          const lastMsg = msgs[msgs.length - 1];
-          if (!lastMsg || lastMsg.key?.fromMe) continue;
-          const ageSec = nowSec - getMsgTimestampSec(lastMsg);
-          if (ageSec > 72 * 3600) continue; // ignora conversas com mais de 3 dias
-          const altJid = lastMsg.key?.remoteJidAlt || lastMsg.key?.senderPn || '';
-          const hadBotPitch = msgs.some(
-            (m) => m.key?.fromMe && BOT_SIGNATURE_WORDS.some((w) => extractMessageText(m).toLowerCase().includes(w))
-          );
-          if (hadBotPitch || isKnownCommercial(jid, altJid)) {
-            const ok = await processIncomingCustomerMsg(lastMsg, { forceCommercial: true });
-            if (ok) {
-              answeredNow += 1;
-              await new Promise((r) => setTimeout(r, 4500));
-            }
-          }
-        }
-      } finally {
-        sweepingBacklog = false;
-      }
-      return answeredNow;
+      // Não enviar respostas retroativas automaticamente após reconexão: a
+      // versão anterior não guardava IDs dos eventos históricos no banco.
+      return 0;
     }
     triggerSweepFn = sweepUnansweredCommercialChats;
 
@@ -613,7 +556,7 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
 // Restaura backup criptografado do Banco Cloud com retentativas até o API Gateway subir!
 function restoreFromCloudWithRetry(attemptsLeft = 40) {
   const req = http.get(
-    { hostname: '127.0.0.1', port: parseInt(API_PORT, 10), path: '/api/internal/wa-auth-restore', timeout: 12000 },
+    { hostname: '127.0.0.1', port: parseInt(API_PORT, 10), path: '/api/internal/wa-auth-restore', timeout: 12000, headers: { 'X-WA-Internal-Secret': process.env.WA_INTERNAL_SECRET || '' } },
     (res) => {
       let chunks = '';
       res.on('data', (c) => (chunks += c));

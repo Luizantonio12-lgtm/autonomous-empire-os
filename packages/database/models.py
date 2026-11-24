@@ -131,6 +131,49 @@ class OmnichannelInteraction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class WhatsAppInboundClaim(Base):
+    """Marca durável de processamento at-most-once de mensagem recebida."""
+    __tablename__ = "whatsapp_inbound_claims"
+
+    message_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    contact_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WhatsAppReplyDelivery(Base):
+    """Status local da tentativa, não é comprovante de entrega ou leitura."""
+    __tablename__ = "whatsapp_reply_deliveries"
+
+    message_hash: Mapped[str] = mapped_column(String(64), ForeignKey("whatsapp_inbound_claims.message_hash"), primary_key=True)
+    interaction_id: Mapped[str] = mapped_column(String(64), ForeignKey("omnichannel_interactions.id"), unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PREPARED")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WhatsAppReplyWindow(Base):
+    """Limite durável de respostas automáticas por contato."""
+    __tablename__ = "whatsapp_reply_windows"
+
+    contact_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WhatsAppHandoffWindow(Base):
+    """Limite durável para comandos manuais ⚡ por número normalizado."""
+    __tablename__ = "whatsapp_handoff_windows"
+
+    contact_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WhatsAppContactPreference(Base):
+    """Preferência de não contato. Reativação exige revisão humana."""
+    __tablename__ = "whatsapp_contact_preferences"
+
+    contact_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    opted_out_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class SemanticMemoryChunk(Base):
     __tablename__ = "semantic_memory"
 
@@ -160,6 +203,29 @@ class PaymentInvoice(Base):
     pix_qr_svg: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PixInvoiceExpectation(Base):
+    """Montante BRL exato do QR criado pelo provedor (somente novas faturas)."""
+    __tablename__ = "pix_invoice_expectations"
+
+    invoice_id: Mapped[str] = mapped_column(String(64), ForeignKey("payment_invoices.id"), primary_key=True)
+    amount_brl_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AsaasWebhookInbox(Base):
+    """Fila durável de eventos em homologação; não concede acesso nem liquida."""
+    __tablename__ = "asaas_webhook_inbox"
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    payment_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="PENDING_REVIEW", nullable=False)
+    verification_reason: Mapped[Optional[str]] = mapped_column(String(96), nullable=True)
+    invoice_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class RuntimeVault(Base):
