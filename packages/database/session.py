@@ -53,6 +53,8 @@ def _normalize_async_db_url(raw_url: str) -> tuple[str, dict]:
     if need_ssl:
         ctx = ssl.create_default_context()
         connect_args["ssl"] = ctx
+    if "pooler" in (parts.hostname or ""):
+        connect_args["statement_cache_size"] = 0
     return clean_url, connect_args
 
 
