@@ -344,12 +344,17 @@ class RealLeadHunter:
                     f"Quem cuida hoje dos agendamentos/pedidos no WhatsApp? Preparei uma avaliação rápida (0 a 10) de como dobrar os fechamentos automáticos de vocês, posso mandar aqui?"
                 )
 
+            demo_personal_url = (
+                f"{public_base_url.rstrip('/')}/demo?loja={urllib.parse.quote(biz_name[:50])}"
+                f"&produto={urllib.parse.quote(venture_name)}&preco={price_usd}"
+            )
+
             pitch = (
                 f"Olá, equipa da {biz_name}! Tudo bem? Vi o perfil de vocês em {city_clean}! "
-                f"Estou liberando na região o *{venture_name}*: nossa IA que atende seus clientes no WhatsApp 24h, "
-                f"agenda/fecha pedidos sozinha, reativa clientes sumidos e já cobra via Pix sem comissão.\n\n"
-                f"Veja funcionando ao vivo aqui: {venture_url}\n"
-                f"Plano completo por apenas *R$ {price_brl}/mês no Pix* (ou teste de 15 dias por R$ 49,90). Posso liberar um teste hoje?"
+                f"Montei uma demonstração exclusiva já com o nome da *{biz_name}* mostrando nossa IA atendendo seus clientes 24h no WhatsApp, "
+                f"agendando sozinha e cobrando via Pix sem comissão:\n\n"
+                f"👉 Veja o painel da sua empresa ao vivo: {demo_personal_url}\n\n"
+                f"Temos ativação expressa de 15 dias por *R$ 49,90* ou *Setup VIP Chave na Mão (entregamos 100% configurado hoje) por R$ 197 no Pix*. Posso liberar hoje?"
             )
 
             wa_encoded = urllib.parse.quote(pitch)

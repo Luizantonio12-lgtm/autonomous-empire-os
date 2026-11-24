@@ -314,6 +314,22 @@ async def serve_trickspace_gamer_store():
     raise HTTPException(status_code=404, detail="Loja TrickSpace não encontrada.")
 
 
+@app.get("/demo")
+async def serve_personalized_client_demo():
+    demo_path = GATEWAY_DIR / "personalized_demo.html"
+    if demo_path.exists():
+        return FileResponse(str(demo_path), media_type="text/html")
+    raise HTTPException(status_code=404, detail="Demo não encontrada.")
+
+
+@app.get("/criativos")
+async def serve_viral_creatives_studio():
+    cr_path = GATEWAY_DIR / "viral_creatives.html"
+    if cr_path.exists():
+        return FileResponse(str(cr_path), media_type="text/html")
+    raise HTTPException(status_code=404, detail="Estúdio de criativos não encontrado.")
+
+
 @app.get("/api/dashboard/overview")
 async def get_dashboard_overview(db: AsyncSession = Depends(get_db)):
     balance = await FinanceAgent.compute_balance_sheet(db)
@@ -1062,6 +1078,19 @@ class WaBridgeInboundRequest(BaseModel):
     message: str
     audio_base64: str = ""
     audio_mime: str = "audio/ogg"
+    image_base64: str = ""
+    image_mime: str = "image/jpeg"
+
+
+class VipSetupCheckoutRequest(BaseModel):
+    business_name: str
+    whatsapp_phone: str
+    venture_name: str = "NexusFlow AI"
+    plan_type: str = "VIP_197"
+
+
+class ViralCreativeGenRequest(BaseModel):
+    topic: str = "TrickSpace ZeroLag v2.6 Gamer Free Fire (R$ 19,90)"
 
 
 class ClientOnboardingConfigRequest(BaseModel):
@@ -1158,8 +1187,77 @@ async def handle_wa_bridge_inbound(
         message=payload.message,
         audio_base64=payload.audio_base64,
         audio_mime=payload.audio_mime,
+        image_base64=payload.image_base64,
+        image_mime=payload.image_mime,
     )
     return {"ok": True, "auto_reply": reply}
+
+
+@app.post("/api/vip-setup/checkout-pix")
+async def create_vip_or_promo_demo_pix(
+    payload: VipSetupCheckoutRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    import re
+    from packages.integrations.whatsapp_evolution import EvolutionWhatsAppManager
+
+    digits = re.sub(r"\D", "", payload.whatsapp_phone)
+    if len(digits) in (10, 11):
+        digits = "55" + digits
+    is_vip = payload.plan_type.upper() == "VIP_197"
+    usd_val = 34.8673 if is_vip else 8.8319
+    brl_str = "197,00" if is_vip else "49,90"
+    desc = f"Setup VIP Chave na Mao {payload.venture_name}" if is_vip else f"Teste 15 Dias {payload.venture_name}"
+
+    inv = await PaymentGatewayManager.create_invoice(
+        db=db,
+        provider="ASAAS_PIX",
+        client_name=payload.business_name[:75],
+        client_email=f"{digits}@whatsapp.com.br",
+        description=desc,
+        amount_usd=usd_val,
+    )
+    await EvolutionWhatsAppManager.notify_owner_vip(
+        f"👑🔔 *[CLIENTE GEROU PIX R$ {brl_str} NA DEMO PERSONALIZADA!]*\n\n"
+        f"🏪 *Empresa:* {payload.business_name} (+{digits})\n"
+        f"📦 *Plano:* {desc}\n"
+        f"🧾 *Fatura:* {inv.id}"
+    )
+    return {
+        "ok": True,
+        "invoice_id": inv.id,
+        "brl_amount": brl_str,
+        "pix_qr_svg": inv.pix_qr_svg,
+        "pix_copy_paste": inv.pix_copy_paste,
+    }
+
+
+@app.post("/api/creatives/generate")
+async def generate_viral_video_script(
+    payload: ViralCreativeGenRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    from packages.llm_router import MultiModelLLMGateway
+
+    out = await MultiModelLLMGateway.complete(
+        db=db,
+        agent_id="agent-growth",
+        task_id=None,
+        system_prompt=(
+            "És um especialista brasileiro em vídeos curtos virais de 15 segundos para TikTok, Reels e Kwai que vendem no Pix. "
+            "Entrega: [GANCHO 0-3s], [DEMONSTRAÇÃO 3-10s], [CHAMADA PRA AÇÃO 10-15s] e [LEGENDA + 5 HASHTAGS]."
+        ),
+        user_prompt=f"Cria um roteiro viral inédito de 15 segundos para vender: {payload.topic}",
+        operation_label="Estúdio de Criativos Virais",
+        strategy="MARGIN_OPTIMIZED",
+        local_fallback_text=(
+            f"🎬 [0-3s GANCHO]: Olha o que essa ferramenta faz em 3 segundos para {payload.topic}!\n"
+            f"📱 [3-10s PROVA]: Mostre a tela funcionando ao vivo sem cortes.\n"
+            f"🚀 [10-15s CTA]: Clica no link da Bio agora e testa no seu celular!\n"
+            f"#vendas #pix #automacao #viral"
+        ),
+    )
+    return {"ok": True, "script": out.content}
 
 
 @app.post("/api/onboarding/configure")

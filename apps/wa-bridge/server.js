@@ -127,6 +127,8 @@ function extractMessageText(msg) {
   return (
     m.conversation ||
     m.extendedTextMessage?.text ||
+    m.imageMessage?.caption ||
+    m.documentWithCaptionMessage?.message?.documentMessage?.caption ||
     m.buttonsResponseMessage?.selectedDisplayText ||
     m.listResponseMessage?.title ||
     ''
@@ -367,6 +369,61 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
       }
     });
 
+    // Ideia #6: Comando Secreto "⚡" pelo próprio WhatsApp do Dono para assumir qualquer conversa na hora!
+    async function processOwnerMagicCommand(msg) {
+      if (!msg?.message || !msg.key?.fromMe) return false;
+      const remoteJid = msg.key.remoteJid || '';
+      if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') return false;
+      const altJid = msg.key.remoteJidAlt || msg.key.participantAlt || msg.key.senderPn || '';
+      if (isOwnerSelf(remoteJid) || isOwnerSelf(altJid)) return false;
+
+      const txt = extractMessageText(msg);
+      if (!txt) return false;
+      const low = txt.toLowerCase();
+      const isBoltTrigger =
+        txt.startsWith('⚡') ||
+        low.includes('nosso assistente vai te') ||
+        low.includes('nosso robô vai te');
+      if (!isBoltTrigger) return false;
+
+      const msgId = msg.key.id || '';
+      if (msgId && answeredMsgIds.has(msgId)) return false;
+      if (msgId) answeredMsgIds.add(msgId);
+
+      registerCommercial(remoteJid);
+      if (altJid) registerCommercial(altJid);
+
+      const realPhoneRaw = (!remoteJid.endsWith('@lid') ? remoteJid : altJid || remoteJid)
+        .split('@')[0]
+        .split(':')[0];
+
+      const cached = chatHistoryCache.get(remoteJid) || [];
+      const lastCust = [...cached].reverse().find((m) => !m.key?.fromMe);
+      const lastCustText = lastCust ? extractMessageText(lastCust) : '';
+      const hint = txt.replace(/^⚡\s*/, '').trim();
+
+      const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
+        remote_jid: remoteJid,
+        phone: realPhoneRaw,
+        contact_name: (lastCust && lastCust.pushName) || `Empresa ${realPhoneRaw.slice(-4)}`,
+        message: `[CEO_HANDOFF_TRIGGER] Dica:${hint || 'Geral'} | Cliente disse: ${lastCustText || 'Pediu informações'}`,
+      });
+
+      if (replyData && replyData.auto_reply && sock && connectionStatus === 'CONNECTED') {
+        try {
+          await sock.sendPresenceUpdate('composing', remoteJid);
+          await new Promise((r) => setTimeout(r, 1500));
+          await sock.sendMessage(remoteJid, { text: replyData.auto_reply });
+          await sock.sendPresenceUpdate('paused', remoteJid);
+          sentCount += 1;
+          return true;
+        } catch (e) {
+          console.error('[WA-BRIDGE] Magic command send error:', e?.message);
+        }
+      }
+      return false;
+    }
+
     async function processIncomingCustomerMsg(msg, { forceCommercial = false } = {}) {
       if (!msg?.message || msg.key?.fromMe) return false;
       const remoteJid = msg.key.remoteJid || '';
@@ -385,11 +442,17 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
         msg.message?.audioMessage ||
         msg.message?.ephemeralMessage?.message?.audioMessage ||
         null;
+      const imageMsg =
+        msg.message?.imageMessage ||
+        msg.message?.ephemeralMessage?.message?.imageMessage ||
+        null;
       let text = extractMessageText(msg);
       let audioBase64 = '';
       let audioMime = 'audio/ogg';
+      let imageBase64 = '';
+      let imageMime = 'image/jpeg';
 
-      if (!text && !audioMsg) return false;
+      if (!text && !audioMsg && !imageMsg) return false;
 
       const low = (text || '').toLowerCase();
       const mentionsProductOrIntent =
@@ -424,14 +487,33 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
         }
       }
 
+      if (imageMsg && typeof downloadMediaMessage === 'function') {
+        try {
+          const buf = await downloadMediaMessage(
+            msg,
+            'buffer',
+            {},
+            { logger: pino({ level: 'silent' }), reuploadRequest: activeSock.updateMediaMessage }
+          );
+          if (buf && buf.length > 0 && buf.length <= 4 * 1024 * 1024) {
+            imageBase64 = Buffer.from(buf).toString('base64');
+            imageMime = String(imageMsg.mimetype || 'image/jpeg').split(';')[0].trim();
+          }
+        } catch (e) {
+          console.error('[WA-BRIDGE] Image download error:', e?.message);
+        }
+      }
+
       const pushName = msg.pushName || `Cliente ${realPhoneRaw}`;
       const replyData = await postJsonLocal('/api/webhooks/wa-bridge-inbound', {
         remote_jid: remoteJid,
         phone: realPhoneRaw,
         contact_name: pushName,
-        message: text || '[ÁUDIO_WHATSAPP]',
+        message: text || (imageBase64 ? '[FOTO_WHATSAPP]' : '[ÁUDIO_WHATSAPP]'),
         audio_base64: audioBase64,
         audio_mime: audioMime,
+        image_base64: imageBase64,
+        image_mime: imageMime,
       });
 
       if (replyData && replyData.auto_reply && sock && connectionStatus === 'CONNECTED') {
@@ -516,7 +598,11 @@ async function startSocket({ resetAuth = false, pairingPhone = null } = {}) {
         return;
       }
       for (const msg of messages || []) {
-        await processIncomingCustomerMsg(msg);
+        if (msg?.key?.fromMe) {
+          await processOwnerMagicCommand(msg);
+        } else {
+          await processIncomingCustomerMsg(msg);
+        }
       }
     });
   } finally {

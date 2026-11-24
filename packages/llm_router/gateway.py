@@ -260,3 +260,63 @@ class MultiModelLLMGateway:
                 continue
         return "[Cliente enviou áudio no WhatsApp pedindo informações sobre o sistema]"
 
+    @classmethod
+    async def analyze_whatsapp_image(
+        cls,
+        db: AsyncSession,
+        image_base64: str,
+        mime_type: str = "image/jpeg",
+        caption: str = "",
+    ) -> str:
+        """
+        Ideia #8: Enxerga fotos enviadas no WhatsApp (comprovantes Pix ou tabelas de preços/cardápios)
+        usando Gemini Vision Multimodal.
+        """
+        if not image_base64:
+            return ""
+        gemini_key = await ConfigVault.get_secret(db, "GEMINI_API_KEY")
+        if not gemini_key:
+            return "[Cliente enviou uma imagem/foto no WhatsApp]"
+
+        clean_mime = (mime_type or "image/jpeg").split(";")[0].trim() if hasattr(str, "trim") else (mime_type or "image/jpeg").split(";")[0].strip()
+        for model in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-3-flash-preview"):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+            body = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "text": (
+                                    "Analisa esta imagem enviada por um cliente no WhatsApp em português do Brasil.\n"
+                                    "1. Se for um COMPROVANTE PIX / BANCÁRIO: começa com '[COMPROVANTE_PIX]' e informa valor, pagador e horário.\n"
+                                    "2. Se for um CARDÁPIO / TABELA DE PREÇOS / SERVIÇOS: começa com '[TABELA_PRECOS]' e cita 2 ou 3 serviços e preços reais que leste na imagem.\n"
+                                    "3. Caso contrário: resume em 1 frase o que aparece na foto."
+                                    + (f"\nLegenda do cliente: {caption}" if caption else "")
+                                )
+                            },
+                            {
+                                "inlineData": {
+                                    "mimeType": clean_mime or "image/jpeg",
+                                    "data": image_base64,
+                                }
+                            },
+                        ],
+                    }
+                ],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 400},
+            }
+            try:
+                async with httpx.AsyncClient(timeout=22.0) as client:
+                    resp = await client.post(url, json=body)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                        txt = " ".join(p.get("text", "") for p in parts).strip()
+                        if txt:
+                            return txt
+            except Exception:
+                continue
+        return "[Cliente enviou uma imagem no WhatsApp]"
+
+

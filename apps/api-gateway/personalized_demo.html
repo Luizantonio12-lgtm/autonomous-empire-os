@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Demonstração Exclusiva — Atendimento IA 24h</title>
+  <style>
+    :root { --bg:#050811; --card:#0e1526; --neon:#00f5a0; --cyan:#00d9f5; --gold:#ffd000; --text:#f8fafc; --muted:#94a3b8; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:radial-gradient(circle at top,#102544 0%,var(--bg) 58%); color:var(--text); padding:22px 15px 60px; min-height:100vh; }
+    .wrap { max-width:650px; margin:0 auto; }
+    .badge { display:inline-block; padding:6px 14px; border-radius:999px; background:rgba(0,245,160,0.13); border:1px solid rgba(0,245,160,0.4); color:var(--neon); font-size:12px; font-weight:800; margin-bottom:12px; }
+    h1 { font-size:clamp(22px,5vw,31px); line-height:1.2; margin-bottom:8px; }
+    .highlight { color:var(--neon); }
+    .sub { color:var(--muted); font-size:14px; margin-bottom:18px; }
+    .wa-sim { background:#0b141a; border:1.5px solid #1f2c34; border-radius:18px; padding:16px; margin-bottom:20px; }
+    .wa-top { display:flex; align-items:center; justify-content:space-between; padding-bottom:10px; margin-bottom:12px; border-bottom:1px solid #1f2c34; }
+    .wa-bubble-in { background:#202c33; color:#e9edef; padding:10px 13px; border-radius:0 12px 12px 12px; max-width:85%; font-size:13.5px; margin-bottom:9px; }
+    .wa-bubble-out { background:#005c4b; color:#e9edef; padding:10px 13px; border-radius:12px 0 12px 12px; max-width:88%; margin-left:auto; font-size:13.5px; margin-bottom:9px; }
+    .sim-btn { padding:8px 13px; border-radius:9px; border:1px solid var(--neon); background:rgba(0,245,160,0.12); color:var(--neon); font-size:12.5px; font-weight:800; cursor:pointer; margin-right:6px; margin-top:6px; }
+    .plans { display:grid; gap:14px; }
+    .plan { background:var(--card); border:1.5px solid rgba(255,255,255,0.12); border-radius:18px; padding:18px; }
+    .plan.vip { border-color:var(--gold); background:linear-gradient(155deg,#18172b,#0d1324); }
+    .price { font-size:28px; font-weight:900; color:var(--neon); margin:6px 0; }
+    .plan.vip .price { color:var(--gold); }
+    input { width:100%; padding:12px; border-radius:10px; border:1px solid rgba(255,255,255,0.16); background:#060a14; color:#fff; font-size:14px; margin-bottom:10px; }
+    .btn { width:100%; padding:14px; border:none; border-radius:11px; font-size:14.5px; font-weight:900; cursor:pointer; }
+    .btn-neon { background:linear-gradient(90deg,var(--neon),var(--cyan)); color:#03150e; }
+    .btn-gold { background:linear-gradient(90deg,var(--gold),#ff9900); color:#1f1200; }
+    #pixModal { display:none; margin-top:16px; padding:18px; border-radius:16px; background:#0b1325; border:1.5px solid var(--neon); text-align:center; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <span class="badge">⚡ AMBIENTE PRÉ-CONFIGURADO • TESTE INTERATIVO</span>
+    <h1>Painel IA 24h — <span class="highlight" id="shopTitle">Sua Empresa</span></h1>
+    <p class="sub">Veja abaixo como o robô do <strong id="prodTitle">NexusFlow AI</strong> atende os clientes da <strong id="shopSub">sua empresa</strong> de madrugada, nos finais de semana e no horário de pico:</p>
+
+    <div class="wa-sim">
+      <div class="wa-top">
+        <div>
+          <strong style="color:#00f5a0;font-size:14.5px;" id="waHeader">🤖 Recepção 24h — Sua Empresa</strong>
+          <div style="font-size:11.5px;color:#8696a0;">online agora • responde em 2 segundos (inclusive áudios e fotos!)</div>
+        </div>
+      </div>
+      <div id="chatArea">
+        <div class="wa-bubble-in">Boa noite! Vocês têm horário disponível amanhã? Quanto custa? <span style="font-size:10px;color:#94a3b8;">22:47</span></div>
+        <div class="wa-bubble-out" id="firstBotMsg">Olá! Seja muito bem-vindo(a)! 😊 Temos vaga amanhã às 10h00 ou às 15h30! Quer que eu já deixe reservado para você com confirmação automática no Pix? <span style="font-size:10px;color:#a7f3d0;">22:47 ✓✓</span></div>
+      </div>
+      <div style="margin-top:8px;">
+        <button class="sim-btn" onclick="simReply('Quero agendar às 15h30!', 'Perfeito! ✅ Horário das 15h30 reservado em seu nome! Também vou te mandar um lembrete automático 2h antes para você não esquecer.')">Testar Agendamento</button>
+        <button class="sim-btn" onclick="simReply('Manda o Pix pra confirmar', 'Aqui está seu Pix Copia e Cola automático! Assim que confirmar, seu horário/pedido já entra direto na nossa agenda! 💸')">Testar Cobrança Pix</button>
+        <button class="sim-btn" onclick="simReply('🎙️ [Áudio de 12s enviado]', 'Acabei de ouvir seu áudio! 😊 Já separei exatamente o que você pediu e confirmei seu atendimento!')">Testar Leitura de Áudio</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <input id="custPhone" type="tel" placeholder="Digite seu WhatsApp com DDD p/ receber o acesso (Ex: 16999887766)" />
+    </div>
+
+    <div class="plans">
+      <div class="plan">
+        <strong style="color:var(--cyan);font-size:13px;">🔥 OPÇÃO 1 • TESTE RÁPIDO SELF-SERVICE (15 DIAS)</strong>
+        <div class="price">R$ 49,90 <span style="font-size:13px;color:var(--muted);font-weight:500;">no Pix (sem fidelidade)</span></div>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">Você mesmo preenche seus horários e preços em 1 minuto no nosso Portal Pós-Pix e já sai usando hoje!</p>
+        <button class="btn btn-neon" onclick="startPix('PROMO_49')">⚡ ATIVAR TESTE DE 15 DIAS (R$ 49,90)</button>
+      </div>
+
+      <div class="plan vip">
+        <strong style="color:var(--gold);font-size:13px;">👑 OPÇÃO 2 • SETUP VIP CHAVE NA MÃO (MAIS ESCOLHIDO!)</strong>
+        <div class="price">R$ 197,00 <span style="font-size:13px;color:#cbd5e1;font-weight:500;">no Pix (30 dias já inclusos!)</span></div>
+        <p style="font-size:13px;color:#e2e8f0;margin-bottom:12px;">Zero trabalho pra você: nossa equipe configura toda sua tabela de preços, horários, reativação de clientes e te entrega 100% pronto hoje!</p>
+        <button class="btn btn-gold" onclick="startPix('VIP_197')">👑 QUERO ENTREGA PRONTA HOJE (R$ 197,00)</button>
+      </div>
+    </div>
+
+    <div id="pixModal">
+      <strong style="color:var(--neon);font-size:15px;" id="pixTitle">📲 Escaneie ou Copie seu Pix Oficial</strong>
+      <div id="qrArea" style="margin:12px auto;display:flex;justify-content:center;"></div>
+      <input id="pixCode" readonly style="font-size:11.5px;color:#a7f3d0;border-color:#10b981;" />
+      <button class="btn btn-neon" id="copyPixBtn">📋 COPIAR PIX COPIA E COLA</button>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const loja = params.get("loja") || "Sua Empresa";
+    const produto = params.get("produto") || "NexusFlow AI";
+    document.getElementById("shopTitle").textContent = loja;
+    document.getElementById("shopSub").textContent = loja;
+    document.getElementById("prodTitle").textContent = produto;
+    document.getElementById("waHeader").textContent = "🤖 Recepção 24h — " + loja;
+
+    function simReply(userTxt, botTxt) {
+      const area = document.getElementById("chatArea");
+      area.innerHTML += `<div class="wa-bubble-in">${userTxt}</div>`;
+      setTimeout(() => {
+        area.innerHTML += `<div class="wa-bubble-out">${botTxt}</div>`;
+      }, 450);
+    }
+
+    async function startPix(planType) {
+      const phone = document.getElementById("custPhone").value.trim() || "16999999999";
+      const modal = document.getElementById("pixModal");
+      modal.style.display = "block";
+      document.getElementById("pixTitle").textContent = "⏳ Gerando QR Code Pix Oficial...";
+      const resp = await fetch("/api/vip-setup/checkout-pix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          business_name: loja,
+          whatsapp_phone: phone,
+          venture_name: produto,
+          plan_type: planType
+        })
+      });
+      const data = await resp.json();
+      if (data && data.ok) {
+        document.getElementById("pixTitle").textContent = `📲 Pix Oficial Gerado (R$ ${data.brl_amount}) — Liberação Automática!`;
+        document.getElementById("qrArea").innerHTML = data.pix_qr_svg || "";
+        document.getElementById("pixCode").value = data.pix_copy_paste || "";
+        document.getElementById("copyPixBtn").onclick = () => {
+          navigator.clipboard.writeText(data.pix_copy_paste || "");
+          document.getElementById("copyPixBtn").textContent = "✅ PIX COPIADO! PAGUE NO SEU BANCO";
+        };
+        modal.scrollIntoView({ behavior: "smooth" });
+      }
+    }
+  </script>
+</body>
+</html>

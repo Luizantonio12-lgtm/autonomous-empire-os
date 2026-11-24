@@ -45,6 +45,19 @@ OBJECTION_KEYWORDS = (
     "49",
 )
 
+VIP_TURNKEY_KEYWORDS = (
+    "197",
+    "chave na mão",
+    "chave na mao",
+    "entregar pronto",
+    "entrega pronto",
+    "configurado",
+    "vocês configuram",
+    "voces configuram",
+    "setup vip",
+    "pronto hoje",
+)
+
 ROTATION_CITIES = (
     "Ribeirão Preto SP",
     "Barretos SP",
@@ -491,39 +504,54 @@ class AutonomousOutreachEngine:
                 f"És o consultor comercial humano e simpático do SaaS '{ven_name}' (R$ {price_brl}/mês no Pix, sem fidelidade). "
                 + ("Acabaste de ouvir o áudio de voz do cliente! Confirma naturalmente que ouviste o áudio dele. " if was_audio else "")
                 + (
-                    f"Entrega o Diagnóstico Rápido prometido: dá Nota 6.8/10 hoje (porque fora do horário comercial e no pico o cliente espera e vai pro concorrente, além de clientes antigos ficarem +90 dias sem retorno) e mostra que com o {ven_name} sobe para Nota 10/10 atendendo 24h, agendando e cobrando no Pix sozinho. Inclui o link da demonstração {pub_url} e pergunta se podes liberar o teste VIP de 15 dias por apenas R$ 49,90 (responda 'QUERO TESTAR')."
+                    "Acabaste de analisar a foto/tabela de preços que o cliente mandou! Cita os serviços e preços reais que leste na imagem dele e confirma que o nosso robô já usa exatamente essa tabela para agendar e cobrar no Pix! "
+                    if was_image
+                    else ""
+                )
+                + (
+                    f"Entrega o Diagnóstico Rápido prometido: dá Nota 6.8/10 hoje (porque fora do horário comercial e no pico o cliente espera e vai pro concorrente) e mostra que com o {ven_name} sobe para Nota 10/10 atendendo 24h, agendando e cobrando no Pix sozinho. Inclui o link exclusivo já com o nome da empresa dele {pub_url} e oferece as 2 opções: Teste Express 15 dias por R$ 49,90 (responda 'QUERO TESTAR') ou Setup VIP Chave na Mão 100% configurado hoje por R$ 197 (responda 'SETUP VIP')."
                     if first_warm_reply and not pix_block
                     else (
                         "Responde no WhatsApp em português do Brasil natural, curto (máximo 3 frases diretas), tirando a dúvida do cliente "
                         + (
-                            "e avisando que liberaste uma ativação promocional de 15 dias por apenas R$ 49,90 com o Pix Copia e Cola logo abaixo."
-                            if has_price_objection and pix_block
+                            "e avisando que geraste o Pix de R$ 197,00 do Setup VIP Chave na Mão logo abaixo."
+                            if wants_vip_197 and pix_block
                             else (
-                                "e avisando que já geraste o Pix Copia e Cola logo abaixo para ativar agora."
-                                if pix_block
-                                else f"e perguntando se podes liberar a ativação promocional hoje (teste de 15 dias por R$ 49,90 ou plano completo R$ {price_brl}/mês — basta responder 'QUERO TESTAR') com demonstração em {pub_url}."
+                                "e avisando que liberaste uma ativação promocional de 15 dias por apenas R$ 49,90 com o Pix Copia e Cola logo abaixo."
+                                if has_price_objection and pix_block
+                                else (
+                                    "e avisando que já geraste o Pix Copia e Cola logo abaixo para ativar agora."
+                                    if pix_block
+                                    else f"e apresentando o painel exclusivo da empresa dele {pub_url} com 2 opções no Pix: Teste 15 dias por R$ 49,90 ('QUERO TESTAR') ou Entrega Pronta Chave na Mão por R$ 197 ('SETUP VIP')."
+                                )
                             )
                         )
                     )
                 )
             ),
-            user_prompt=f"Cliente ({contact_name}) respondeu no WhatsApp" + (" [POR ÁUDIO DE VOZ]" if was_audio else "") + f": '{message}'",
+            user_prompt=(
+                f"Cliente ({contact_name}) no WhatsApp"
+                + (" [POR ÁUDIO DE VOZ]" if was_audio else (" [ENVIOU FOTO/TABELA]" if was_image else ""))
+                + f": '{message}'"
+            ),
             operation_label=f"Closer WhatsApp Autónomo ({contact_name})",
             strategy="MARGIN_OPTIMIZED",
             local_fallback_text=(
                 (
-                    f"📊 *Diagnóstico Rápido — {contact_name}:* Hoje sua nota de velocidade no WhatsApp é *6.8/10* (clientes à noite ou no horário de pico acabam fechando no concorrente). "
-                    f"Com o *{ven_name}* sua empresa vai para *10/10*: nossa IA atende 24h, agenda e cobra no Pix sozinha!\n\n"
-                    f"Veja ao vivo: {pub_url}\n"
-                    f"Posso liberar nosso teste VIP de 15 dias por apenas *R$ 49,90 no Pix*? (Responda *QUERO TESTAR*)"
+                    f"📊 *Diagnóstico Rápido — {clean_cname}:* Hoje sua nota de velocidade no WhatsApp é *6.8/10* (clientes à noite ou no pico acabam indo pro concorrente). "
+                    f"Com o *{ven_name}* sua empresa sobe para *10/10*: nossa IA atende 24h, agenda e cobra no Pix sozinha!\n\n"
+                    f"👉 Veja o painel que já montei com o nome da sua empresa: {pub_url}\n\n"
+                    f"Escolha como prefere ativar:\n"
+                    f"1️⃣ *Teste 15 dias Self-Service:* R$ 49,90 no Pix (responda *QUERO TESTAR*)\n"
+                    f"2️⃣ *Setup VIP Chave na Mão (entregamos pronto hoje):* R$ 197 no Pix (responda *SETUP VIP*)"
                 )
                 if first_warm_reply and not pix_block
                 else (
-                    f"Show, {contact_name}! Com o *{ven_name}* sua loja atende e vende no automático 24h pelo WhatsApp."
+                    f"Show, {clean_cname}! Com o *{ven_name}* sua empresa atende e fecha vendas 24h pelo WhatsApp ({pub_url})."
                     + (
                         ""
                         if pix_block
-                        else " Posso liberar nossa ativação promocional de 15 dias por R$ 49,90 no Pix para você testar hoje? (Responda *QUERO TESTAR*)"
+                        else " Prefere o Teste de 15 dias por *R$ 49,90* (*QUERO TESTAR*) ou entregarmos 100% configurado hoje por *R$ 197* (*SETUP VIP*)?"
                     )
                 )
             ),
@@ -537,9 +565,13 @@ class AutonomousOutreachEngine:
             department="SALES",
             contact_name=contact_name[:80],
             contact_handle=phone,
-            inbound_message=(f"[🎙️ Áudio]: {message}" if was_audio else message)[:1000],
+            inbound_message=(
+                f"[🎙️ Áudio]: {message}"
+                if was_audio
+                else (f"[📸 Foto]: {message}" if was_image else message)
+            )[:1000],
             agent_response=final_reply[:1800],
-            sentiment="BUYING_INTENT" if (wants_to_buy or has_price_objection) else "QUESTION",
+            sentiment="BUYING_INTENT" if (wants_to_buy or has_price_objection or wants_vip_197) else "QUESTION",
             deal_stage=deal_stage,
             deal_value_usd=round(billed_usd, 2) if pix_block else 0.0,
         )
@@ -557,7 +589,11 @@ class AutonomousOutreachEngine:
         )
 
         if pix_block:
-            brl_sent = "49,90 (Promo 15 dias)" if has_price_objection else f"{price_brl}/mês"
+            brl_sent = (
+                "197,00 (Setup VIP Chave na Mão)"
+                if wants_vip_197
+                else ("49,90 (Promo 15 dias)" if has_price_objection else f"{price_brl}/mês")
+            )
             await EvolutionWhatsAppManager.notify_owner_vip(
                 f"🔔 *[ALERTA VIP • CLIENTE PEDIU PIX!]*\n\n"
                 f"🏪 *Cliente:* {contact_name} (+{phone})\n"

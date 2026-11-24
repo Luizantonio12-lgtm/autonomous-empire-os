@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Estúdio de Criativos Virais — TikTok, Reels, Shorts & Status</title>
+  <style>
+    :root { --bg:#060812; --card:#0f1629; --neon:#00f5a0; --cyan:#00d9f5; --gold:#ffd000; --text:#f8fafc; --muted:#94a3b8; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:radial-gradient(circle at top,#1c103b 0%,var(--bg) 60%); color:var(--text); padding:24px 16px 60px; min-height:100vh; }
+    .wrap { max-width:680px; margin:0 auto; }
+    .tag { display:inline-block; padding:6px 14px; border-radius:999px; background:rgba(0,217,245,0.14); border:1px solid rgba(0,217,245,0.4); color:var(--cyan); font-size:12px; font-weight:800; margin-bottom:12px; }
+    h1 { font-size:26px; margin-bottom:8px; }
+    .sub { color:var(--muted); font-size:14px; margin-bottom:20px; }
+    .card { background:var(--card); border:1px solid rgba(255,255,255,0.1); border-radius:18px; padding:18px; margin-bottom:16px; }
+    .card h3 { color:var(--neon); font-size:16px; margin-bottom:8px; }
+    pre { white-space:pre-wrap; font-family:inherit; font-size:13.5px; color:#e2e8f0; background:#070b15; padding:13px; border-radius:11px; border:1px solid rgba(255,255,255,0.08); line-height:1.5; }
+    .btn { margin-top:10px; padding:11px 16px; border:none; border-radius:10px; background:linear-gradient(90deg,var(--neon),var(--cyan)); color:#03150e; font-weight:800; font-size:13px; cursor:pointer; width:100%; }
+    .btn-ai { background:linear-gradient(90deg,#a855f7,#ec4899); color:#fff; margin-bottom:18px; font-size:14.5px; padding:14px; }
+    select { width:100%; padding:12px; border-radius:10px; background:#070b15; color:#fff; border:1px solid rgba(255,255,255,0.16); margin-bottom:10px; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <span class="tag">🎬 FÁBRICA DE TRÁFEGO ORGÂNICO GRÁTIS</span>
+    <h1>Roteiros Virais Prontos (TikTok, Reels, Kwai & Status)</h1>
+    <p class="sub">Grave em 15 segundos mostrando a tela do celular e coloque o link na Bio/Comentário Fixado para vender no automático!</p>
+
+    <div class="card">
+      <h3 style="color:#f472b6;">✨ Gerar Roteiro Novo Sob Medida com IA</h3>
+      <select id="nicheSel">
+        <option value="TrickSpace ZeroLag v2.6 Gamer Free Fire (R$ 19,90)">🎮 TrickSpace ZeroLag Gamer Free Fire (R$ 19,90)</option>
+        <option value="Robô WhatsApp 24h para Barbearias e Clínicas (R$ 49,90)">💈 Robô WhatsApp 24h p/ Barbearias e Clínicas</option>
+        <option value="ReativaCliente Flash para Lojas e Oficinas">🔥 ReativaCliente Flash (Trazer Clientes Sumidos)</option>
+        <option value="ZapPedido Delivery Sem Taxa do iFood">🍕 ZapPedido Delivery (0% Comissão)</option>
+      </select>
+      <button class="btn btn-ai" id="genBtn" onclick="generateFresh()">✨ GERAR ROTEIRO INÉDITO AGORA</button>
+      <div id="aiOutBox" style="display:none;">
+        <pre id="aiOutText"></pre>
+        <button class="btn" onclick="copyPre('aiOutText', this)">📋 COPIAR ROTEIRO + LEGENDA</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>🎮 Vídeo 1 (15s TikTok/Kwai) — TrickSpace ZeroLag R$ 19,90</h3>
+      <pre id="s1">[CENA 0-3s]: Mostre o celular abrindo a Bolinha Flutuante verde do TrickSpace por cima do jogo.
+TEXTO NA TELA: "Como ativar a Bolinha Game Space + Botão Trick sem dar lag nem fechar sozinho 🔥"
+
+[CENA 3-10s]: Arraste a mira auxiliar (🔓 Mover), posicione em cima do botão de tiro e toque em 🔒 Travar + 🔋 Blindar Bateria.
+FALA: "Olha isso: você posiciona o Botão Trick em cima do botão de atirar, trava com zero bloqueio de toque e blinda a bateria em Xiaomi e Samsung!"
+
+[CENA 10-15s]: Mostre a loja oficial.
+FALA: "Vitalício por R$ 19,90 no Pix e o APK já cai no seu WhatsApp em 3 segundos! Link na bio!"
+
+LEGENDA: Bolinha Flutuante + Botão Trick ZeroLag v2.6 liberado no automático 🔥 Link na Bio: https://autonomous-empire-os.onrender.com/trickspace #freefire #sensi #trickbutton #gamespace #zerolag</pre>
+      <button class="btn" onclick="copyPre('s1', this)">📋 COPIAR ROTEIRO GAMER</button>
+    </div>
+
+    <div class="card">
+      <h3>🏢 Vídeo 2 (15s Reels/TikTok) — Teste Robô em 3 Segundos</h3>
+      <pre id="s2">[CENA 0-3s]: Mostre a tela da Vitrine no celular.
+FALA: "Dono de clínica, oficina, barbearia ou delivery: duvida que uma IA atende e agenda seus clientes 24h no WhatsApp?"
+
+[CENA 3-10s]: Digite um número na Vitrine e mostre a mensagem chegando no WhatsApp em 3 segundos!
+FALA: "Acabei de colocar meu número aqui e em 3 segundos ela já me chamou, ouve até áudio do cliente e já cobra no Pix sem taxa!"
+
+[CENA 10-15s]: Aponte para o link da Bio.
+FALA: "Teste grátis no seu próprio WhatsApp agora clicando no link do perfil!"
+
+LEGENDA: Teste o robô chamando você em 3 segundos 👇 https://autonomous-empire-os.onrender.com/vitrine #empreendedorismo #automacaowhatsapp #negocioslocais #vendas</pre>
+      <button class="btn" onclick="copyPre('s2', this)">📋 COPIAR ROTEIRO EMPRESAS</button>
+    </div>
+
+    <div class="card">
+      <h3>📲 Sequência de 3 Status para Postar no Seu WhatsApp Hoje</h3>
+      <pre id="s3">📌 STATUS 1:
+Você que tem loja, clínica, oficina, salão ou delivery: quantos clientes você perde à noite ou no horário de almoço porque demora pra responder o WhatsApp? 🤔
+
+📌 STATUS 2:
+Liberamos nossa IA que atende seus clientes 24h, escuta áudio, lê foto de comprovante e já agenda cobrando no Pix sozinha! 🤖💸
+
+📌 STATUS 3:
+Quer ver ela te chamando em 3 segundos no seu celular agora? Clica aqui e testa ao vivo 👇
+https://autonomous-empire-os.onrender.com/vitrine</pre>
+      <button class="btn" onclick="copyPre('s3', this)">📋 COPIAR SEQUÊNCIA DE STATUS</button>
+    </div>
+  </div>
+
+  <script>
+    function copyPre(id, btn) {
+      navigator.clipboard.writeText(document.getElementById(id).textContent);
+      const old = btn.textContent;
+      btn.textContent = "✅ COPIADO!";
+      setTimeout(() => (btn.textContent = old), 2000);
+    }
+    async function generateFresh() {
+      const btn = document.getElementById("genBtn");
+      btn.disabled = true;
+      btn.textContent = "⏳ Gerando roteiro viral com IA...";
+      try {
+        const resp = await fetch("/api/creatives/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ topic: document.getElementById("nicheSel").value })
+        });
+        const data = await resp.json();
+        document.getElementById("aiOutBox").style.display = "block";
+        document.getElementById("aiOutText").textContent = data.script || "Erro ao gerar.";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "✨ GERAR ROTEIRO INÉDITO AGORA";
+      }
+    }
+  </script>
+</body>
+</html>

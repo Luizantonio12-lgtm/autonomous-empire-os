@@ -1151,6 +1151,16 @@ export default function App() {
             </a>
 
             <a
+              href="/criativos"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 text-xs font-bold transition"
+              title="Gerador de Roteiros Virais TikTok, Reels, Kwai & Status"
+            >
+              🎬 Criativos
+            </a>
+
+            <a
               href="/api/system/export-monorepo.zip"
               download
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-500/15 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/25 text-xs font-bold transition"

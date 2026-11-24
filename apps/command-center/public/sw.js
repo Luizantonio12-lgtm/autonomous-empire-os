@@ -13,7 +13,9 @@ self.addEventListener('fetch', (event) => {
     u.pathname.startsWith('/api/') ||
     u.pathname.startsWith('/meu-robo/') ||
     u.pathname === '/vitrine' ||
-    u.pathname === '/trickspace'
+    u.pathname === '/trickspace' ||
+    u.pathname === '/demo' ||
+    u.pathname === '/criativos'
   ) {
     return;
   }
