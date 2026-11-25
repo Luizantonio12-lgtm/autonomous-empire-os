@@ -1,0 +1,101 @@
+From 9b045963f6b326d7b6499bf13ed5590f8d6d06f8 Mon Sep 17 00:00:00 2001
+From: Autonomous Empire Architect <architect@nexusflow.ai>
+Date: Wed, 25 Nov 2026 00:47:14 +0000
+Subject: [PATCH] fix(asaas): aceitar IDs de evento com caracteres extras como
+ no exemplo oficial
+
+---
+ packages/payments/asaas_sandbox_inbox.py | 25 ++++++++++++++++++++----
+ tests/test_asaas_sandbox_inbox.py        | 14 +++++++++++++
+ 2 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/packages/payments/asaas_sandbox_inbox.py b/packages/payments/asaas_sandbox_inbox.py
+index d769522..96c01cc 100644
+--- a/packages/payments/asaas_sandbox_inbox.py
++++ b/packages/payments/asaas_sandbox_inbox.py
+@@ -1,4 +1,5 @@
+ """Fila Asaas restrita a sandbox. Não libera produtos nem liquida faturas.
+ 
+ Persistir antes de responder e validar cobranças separadamente. Para uso em
+"""
++import hashlib
+ import os
+ import re
+ from datetime import datetime, timezone
+@@ -19,16 +20,27 @@ from packages.payments.asaas_validation import verify_static_pix
+ 
+ SANDBOX_BASE = 'https://api-sandbox.asaas.com/v3'
+ SAFE_ID = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
++UNSAFE_CHARS = re.compile(r'[^A-Za-z0-9_-]')
++
++
++def stable_event_id(raw_id: str) -> str:
++    """Aceita o ID do evento do Asaas como enviado e devolve chave segura.
++
++    O Asaas pode enviar IDs com caracteres fora de [A-Za-z0-9_-] (por exemplo
++    ``evt_...&368604920``). O valor original é preservado via hash, de modo que
++    entregas repetidas continuam sendo reconhecidas como o mesmo evento.
++    """
++    if SAFE_ID.fullmatch(raw_id):
++        return raw_id
++    digest = hashlib.sha256(raw_id.encode('utf-8', 'surrogatepass')).hexdigest()[:16]
++    base = UNSAFE_CHARS.sub('-', raw_id).strip('-') or 'evento'
++    return f'{base[:111]}-{digest}'
+ 
+ 
+ def sandbox_enabled() -> bool:
+     return (os.getenv('ASAAS_SANDBOX_INBOX_ENABLED', '').lower() == 'true'
+             and os.getenv('ASAAS_BASE_URL', '').rstrip('/') == SANDBOX_BASE)
+ 
+ 
+ def normalize_event(body: object) -> tuple[str, str, str | None]:
+     if not isinstance(body, dict):
+         raise ValueError('Evento inválido')
+-    event_id, event_type = body.get('id'), body.get('event')
+-    if not isinstance(event_id, str) or not SAFE_ID.fullmatch(event_id):
++    raw_id, event_type = body.get('id'), body.get('event')
++    if not isinstance(raw_id, str) or not 1 <= len(raw_id) <= 256:
+         raise ValueError('Identificador de evento inválido')
++    event_id = stable_event_id(raw_id)
+     if not isinstance(event_type, str) or not SAFE_ID.fullmatch(event_type) or len(event_type) > 96:
+         raise ValueError('Tipo de evento inválido')
+     payment = body.get('payment')
+@@ -64,9 +76,10 @@ async def verify_received_event(db: AsyncSession, event_id: str) -> dict:
+     """Consulta cobrança no Sandbox Asaas e registra conferência sem liquidar."""
+     if not sandbox_enabled():
+         raise RuntimeError('Somente sandbox')
+-    if not SAFE_ID.fullmatch(event_id):
++    if not isinstance(event_id, str) or not 1 <= len(event_id) <= 256:
+         raise ValueError('Evento inválido')
+-    event = await db.get(AsaasWebhookInbox, event_id)
++    event = await db.get(AsaasWebhookInbox, stable_event_id(event_id))
+     if not event:
+         raise LookupError('Evento não encontrado')
+     if event.event_type != 'PAYMENT_RECEIVED' or not event.payment_id:
+diff --git a/tests/test_asaas_sandbox_inbox.py b/tests/test_asaas_sandbox_inbox.py
+index 44aa784..6e57947 100644
+--- a/tests/test_asaas_sandbox_inbox.py
++++ b/tests/test_asaas_sandbox_inbox.py
+@@ -144,6 +144,19 @@ class TestSandboxInbox(unittest.IsolatedAsyncioTestCase):
+             self.assertEqual(result['invoice_id'],'inv-1')
+             self.assertEqual((await db.get(PaymentInvoice,'inv-1')).status,'PENDING')
+ 
++    async def test_official_event_id_with_ampersand_is_accepted_idempotently(self):
++        # Exemplo oficial da documentacao do Asaas: o id do evento contem "&".
++        body={'id':'evt_05b708f961d739ea7eba7e4db318f621&368604920','event':'PAYMENT_RECEIVED','dateCreated':'2024-06-12 16:45:03','payment':{'object':'payment','id':'pay_080225913252'}}
++        first=await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=body)
++        self.assertEqual(first.status_code,200); self.assertTrue(first.json()['recorded'])
++        again=await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=body)
++        self.assertEqual(again.status_code,200); self.assertFalse(again.json()['recorded'])
++        async with self.sessions() as db:
++            events=(await db.execute(select(AsaasWebhookInbox))).scalars().all()
++            self.assertEqual(len(events),1)
++            self.assertTrue(events[0].event_id.startswith('evt_05b708f961d739ea7eba7e4db318f621'))
++            self.assertNotIn('&',events[0].event_id)
++            self.assertEqual(events[0].status,'PENDING_REVIEW')
++
+ 
+ if __name__ == '__main__': unittest.main()
+-- 
+2.39.5
+

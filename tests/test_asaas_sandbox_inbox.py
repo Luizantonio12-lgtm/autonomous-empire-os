@@ -144,4 +144,11 @@ class TestSandboxInbox(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result['invoice_id'],'inv-1')
             self.assertEqual((await db.get(PaymentInvoice,'inv-1')).status,'PENDING')
 
+    async def test_official_event_id_with_ampersand_is_accepted_idempotently(self):
+        body={'id':'evt_05b708f961d739ea7eba7e4db318f621&368604920','event':'PAYMENT_RECEIVED','payment':{'object':'payment','id':'pay_080225913252'}}
+        r=await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=body)
+        self.assertEqual(r.status_code,200); self.assertTrue(r.json()['recorded'])
+        r=await self.client.post('/api/webhooks/asaas',headers=self.headers(),json=body)
+        self.assertEqual(r.status_code,200); self.assertFalse(r.json()['recorded'])
+
 if __name__ == '__main__': unittest.main()

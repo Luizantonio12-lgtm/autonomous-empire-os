@@ -3,6 +3,7 @@
 Persistir antes de responder e validar cobranças separadamente. Para uso em
 produção faltam reconciliação transacional, liberação e testes com provedor.
 """
+import hashlib
 import os
 import re
 from datetime import datetime, timezone
@@ -20,6 +21,15 @@ from packages.payments.asaas_validation import verify_static_pix
 
 SANDBOX_BASE = 'https://api-sandbox.asaas.com/v3'
 SAFE_ID = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
+UNSAFE_CHARS = re.compile(r'[^A-Za-z0-9_-]')
+
+
+def stable_event_id(raw_id):
+    if SAFE_ID.fullmatch(raw_id):
+        return raw_id
+    d = hashlib.sha256(raw_id.encode('utf-8','surrogatepass')).hexdigest()[:16]
+    b = UNSAFE_CHARS.sub('-', raw_id).strip('-') or 'evento'
+    return f'{b[:111]}-{d}'
 
 
 def sandbox_enabled() -> bool:
@@ -30,9 +40,10 @@ def sandbox_enabled() -> bool:
 def normalize_event(body: object) -> tuple[str, str, str | None]:
     if not isinstance(body, dict):
         raise ValueError('Evento inválido')
-    event_id, event_type = body.get('id'), body.get('event')
-    if not isinstance(event_id, str) or not SAFE_ID.fullmatch(event_id):
+    raw_id, event_type = body.get('id'), body.get('event')
+    if not isinstance(raw_id, str) or not 1 <= len(raw_id) <= 256:
         raise ValueError('Identificador de evento inválido')
+    event_id = stable_event_id(raw_id)
     if not isinstance(event_type, str) or not SAFE_ID.fullmatch(event_type) or len(event_type) > 96:
         raise ValueError('Tipo de evento inválido')
     payment = body.get('payment')
@@ -68,9 +79,9 @@ async def verify_received_event(db: AsyncSession, event_id: str) -> dict:
     """Consulta cobrança no Sandbox Asaas e registra conferência sem liquidar."""
     if not sandbox_enabled():
         raise RuntimeError('Somente sandbox')
-    if not SAFE_ID.fullmatch(event_id):
+    if not isinstance(event_id, str) or not 1 <= len(event_id) <= 256:
         raise ValueError('Evento inválido')
-    event = await db.get(AsaasWebhookInbox, event_id)
+    event = await db.get(AsaasWebhookInbox, stable_event_id(event_id))
     if not event:
         raise LookupError('Evento não encontrado')
     if event.event_type != 'PAYMENT_RECEIVED' or not event.payment_id:
