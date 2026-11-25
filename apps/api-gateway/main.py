@@ -119,7 +119,10 @@ async def restrict_sensitive_api(request: Request, call_next):
 
 @app.exception_handler(PaymentGatewayUnavailable)
 async def payment_unavailable_handler(request: Request, exc: PaymentGatewayUnavailable):
-    return JSONResponse(status_code=503, content={"ok": False, "detail": "Pagamento indisponível. Tente novamente mais tarde."})
+    # Repassa apenas o motivo tecnico controlado (nomes de etapa e codigos HTTP),
+    # nunca chaves ou payloads. Mantem a negativa clara para o operador.
+    motivo = str(exc).strip()[:160] or "Pagamento indisponível. Tente novamente mais tarde."
+    return JSONResponse(status_code=503, content={"ok": False, "detail": motivo})
 
 
 app.add_middleware(
