@@ -31,4 +31,4 @@ COPY --from=wa-bridge-builder /wa /app/apps/wa-bridge
 
 RUN mkdir -p /app/deployments /app/.wa_auth
 EXPOSE 10000
-CMD ["sh", "-c", "WA_INTERNAL_SECRET=$(python -c 'import secrets; print(secrets.token_hex(32))'); export WA_INTERNAL_SECRET; PORT=${PORT:-10000} WA_BRIDGE_PORT=3005 WA_AUTH_DIR=/app/.wa_auth node /app/apps/wa-bridge/server.js & exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --app-dir /app/apps/api-gateway"]
+CMD ["sh", "-c", "WA_INTERNAL_SECRET=$(python -c 'import secrets; print(secrets.token_hex(32))'); export WA_INTERNAL_SECRET; if [ \"$WA_BRIDGE_ENABLED\" = \"true\" ]; then PORT=${PORT:-10000} WA_BRIDGE_PORT=3005 WA_AUTH_DIR=/app/.wa_auth node /app/apps/wa-bridge/server.js & fi; exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --app-dir /app/apps/api-gateway"]
