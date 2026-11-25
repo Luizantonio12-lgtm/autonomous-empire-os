@@ -916,7 +916,12 @@ async def create_payment_invoice(
         description=payload.description,
         amount_usd=payload.amount_usd,
     )
-    return {"ok": True, "invoice_id": inv.id}
+    return {
+        "ok": True,
+        "invoice_id": inv.id,
+        "pix_copy_paste": inv.pix_copy_paste,
+        "pix_qr_svg": inv.pix_qr_svg,
+    }
 
 
 @app.post("/api/webhooks/payments/{invoice_id}/settle")
