@@ -98,6 +98,7 @@ class PaymentGatewayManager:
         external_id = f"ext_{uuid.uuid4().hex[:12]}"
         amount_brl_cents: int | None = None
 
+        pix_fail_reason = "etapa_desconhecida"
         if provider_clean == "STRIPE":
             stripe_key = await ConfigVault.get_secret(db, "STRIPE_SECRET_KEY")
             if stripe_key:
@@ -136,6 +137,8 @@ class PaymentGatewayManager:
                 "User-Agent": "AutonomousEmpireOS/3.0",
                 "Content-Type": "application/json",
             }
+            if not asaas_key:
+                pix_fail_reason = "chave_api_sandbox_ausente"
             if asaas_key:
                 try:
                     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -145,6 +148,8 @@ class PaymentGatewayManager:
                             f"{asaas_base}/pix/addressKeys",
                             headers=asaas_headers,
                         )
+                        if keys_resp.status_code >= 300:
+                            pix_fail_reason = f"listar_chaves_http_{keys_resp.status_code}"
                         if keys_resp.status_code < 300:
                             items = keys_resp.json().get("data", [])
                             active_keys = [k for k in items if k.get("status") == "ACTIVE"]
@@ -157,9 +162,13 @@ class PaymentGatewayManager:
                                 headers=asaas_headers,
                                 json={"type": "EVP"},
                             )
+                            if create_key_resp.status_code >= 300:
+                                pix_fail_reason = f"criar_chave_http_{create_key_resp.status_code}"
                             if create_key_resp.status_code < 300:
                                 address_key = create_key_resp.json().get("key")
 
+                        if not address_key and pix_fail_reason == "etapa_desconhecida":
+                            pix_fail_reason = "sem_chave_pix_ativa"
                         # 2. Gera QR Code Pix oficial escaneável em Reais (BRL)
                         if address_key:
                             brl_amount = max((Decimal(str(amount_usd)) * Decimal('5.65')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), Decimal('1.00'))
@@ -178,6 +187,8 @@ class PaymentGatewayManager:
                                     "externalReference": inv_id,
                                 },
                             )
+                            if qr_resp.status_code >= 300:
+                                pix_fail_reason = f"criar_qrcode_http_{qr_resp.status_code}"
                             if qr_resp.status_code < 300:
                                 qdata = qr_resp.json()
                                 external_id = qdata.get("id", external_id)
@@ -201,7 +212,9 @@ class PaymentGatewayManager:
 
             if not pix_copy_paste or not isinstance(external_id, str) or not external_id or external_id.startswith('ext_') or amount_brl_cents is None:
                 # Nunca apresentar um payload sintético ou QR sem ID conciliável.
-                raise PaymentGatewayUnavailable("Não foi possível criar Pix real no Asaas.")
+                raise PaymentGatewayUnavailable(
+                    f"Sandbox recusou a criação do Pix ({pix_fail_reason})."
+                )
             # Sem imagem do provedor, ofereça apenas o código copia e cola.
             # generate_matrix_qr_svg não é um codificador QR válido.
 
