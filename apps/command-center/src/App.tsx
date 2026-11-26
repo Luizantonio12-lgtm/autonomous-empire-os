@@ -1478,6 +1478,7 @@ export default function App() {
 
         {/* NAVEGAÇÃO POR MÓDULOS DO PAINEL ADM v3.0 */}
         <nav className="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
+          <a href="/api/opportunities/view" className="px-4 py-2 rounded-lg border border-emerald-700 text-emerald-200 hover:bg-emerald-900/30">Radar de oportunidades</a>
           {(
             [
               {
