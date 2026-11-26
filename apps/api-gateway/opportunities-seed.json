@@ -4,26 +4,34 @@
     "name": "Rodrigues & Prates",
     "sector": "Advocacia",
     "state": "Aprofundar pesquisa",
-    "evidence": "Diretório apresenta endereço em Guaíra/SP. Domínio independente não localizado nas buscas consultadas.",
-    "confidence": "Localização corroborada; atividade e necessidade comercial não confirmadas.",
-    "idea": "Hipótese: apresentação institucional, se houver necessidade confirmada. Não criar proposta personalizada ainda.",
+    "evidence": "Perfil Instagram apresenta link para material no Canva com título do escritório. Conteúdo do material não foi recuperado para avaliação. Diretórios corroboram Guaíra/SP.",
+    "confidence": "Presença social e material externo identificados; domínio próprio, necessidade e interesse não confirmados.",
+    "idea": "Examinar a apresentação já utilizada antes de propor substituição. Suspender oferta baseada em ausência de presença digital.",
     "links": [
       [
         "Diretório Previdenciarista",
         "https://previdenciarista.com/advogados/rodrigues-advogados-associados-1fa6e8de-f2e7-11ea-9479-029f7943d304/"
+      ],
+      [
+        "Perfil Instagram",
+        "https://www.instagram.com/rptadvogados/"
+      ],
+      [
+        "Material vinculado no Canva",
+        "https://www.canva.com/design/DAF9P6rLItE/Qz6em7ouOtnB8xMFItFEuA/view"
       ]
     ],
     "analysis": {
       "nome": "Rodrigues & Prates",
       "status": "aprofundar_pesquisa",
       "pendencias": [
-        "Investigar domínio: ausência de resultado não comprova ausência de site.",
-        "Confirmar necessidade e interesse do responsável."
+        "Avaliar material já utilizado; vínculo com domínio próprio não estabelecido.",
+        "Confirmar identidade profissional, necessidade e interesse antes de proposta nominal."
       ],
       "sem_site_confirmado": false,
       "envio_autorizado": false,
       "publicacao_autorizada": false,
-      "fontes_validas": 1
+      "fontes_validas": 3
     }
   },
   {
@@ -31,25 +39,25 @@
     "name": "Lacerda Advocacia",
     "sector": "Advocacia",
     "state": "Aprofundar pesquisa",
-    "evidence": "Perfil social e listagem em diretório de Guaíra/SP. Não foi identificado domínio independente nas consultas.",
-    "confidence": "Indícios de localização; identidade, atividade e domínio exigem confirmação.",
-    "idea": "Hipótese: site institucional informativo. Confirmar interesse e revisar normas profissionais.",
+    "evidence": "Perfil individual no Jurídico Certo identifica Vagner Lacerda em Guaíra/SP. Domínio homônimo lacerdaadvogados.adv.br apresenta endereço em Curitiba/PR; vínculo com o candidato não estabelecido.",
+    "confidence": "Localidade corroborada em diretório; identidade profissional, domínio, atividade atual e necessidade comercial pendentes.",
+    "idea": "Não atribuir domínio homônimo nem afirmar ausência de site. Manter validação antes de proposta nominal.",
     "links": [
       [
         "Perfil público",
         "https://www.facebook.com/dr.vagnerlacerda/"
       ],
       [
-        "Diretório Jurídico Certo",
-        "https://juridicocerto.com/profissionais/sp/guaira/advogado"
+        "Perfil individual Jurídico Certo",
+        "https://juridicocerto.com/adv/vagnerlacerda-advoga"
       ]
     ],
     "analysis": {
       "nome": "Lacerda Advocacia",
       "status": "evidencia_insuficiente",
       "pendencias": [
-        "Confirmar município e identidade.",
-        "Investigar domínio: ausência de resultado não comprova ausência de site.",
+        "Confirmar identidade profissional e vínculo entre perfis.",
+        "Verificar domínio próprio; não atribuir site de Curitiba sem evidência positiva.",
         "Confirmar necessidade e interesse do responsável."
       ],
       "sem_site_confirmado": false,
