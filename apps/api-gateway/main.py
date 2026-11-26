@@ -67,10 +67,15 @@ from packages.ventures import AutonomousVentureBuilder  # noqa: E402
 
 
 async def _boot_seed_and_daemons():
-    try:
-        await run_seed()
-    except Exception as exc:
-        print(f"[EMPIRE BOOT] Seed warning: {exc}")
+    if os.getenv("EMPIRE_SEED_ENABLED", "false").strip().lower() == "true":
+        try:
+            await run_seed()
+        except Exception:
+            # Não imprimir exceções que possam conter detalhes de conexão ou dados.
+            print("[EMPIRE BOOT] Falha na carga inicial; detalhes omitidos.")
+    # Padrão seguro: abrir o painel não autoriza iniciar trabalhadores de fundo.
+    if os.getenv("EMPIRE_BACKGROUND_WORKERS_ENABLED", "false").strip().lower() != "true":
+        return
     AutonomousSchedulerDaemon.start_background_worker()
     AutonomousOutreachEngine.start_autopilot_daemon()
 
@@ -94,6 +99,9 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+from packages.opportunities import router as opportunities_router
+app.include_router(opportunities_router)
 
 @app.middleware("http")
 async def restrict_sensitive_api(request: Request, call_next):
@@ -1679,4 +1687,3 @@ if FRONTEND_DIST.exists():
     @app.get("/")
     async def serve_spa_root():
         return FileResponse(str(FRONTEND_DIST / "index.html"))
-
